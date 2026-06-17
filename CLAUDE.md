@@ -1,6 +1,15 @@
 # Manifest Development Guidelines
 
-Last updated: 2026-04-12
+Last updated: 2026-06-17
+
+## CodeGraph
+
+Este repositório está indexado pelo CodeGraph (`.codegraph/` existe na raiz). Use-o **antes** de grep/find ou leitura de arquivos quando precisar entender ou localizar código:
+
+- **MCP tools** (preferido): `codegraph_explore` responde a maioria das perguntas em uma chamada — retorna o código-fonte verbatim dos símbolos relevantes agrupados por arquivo. `codegraph_node` retorna o fonte de um símbolo + seus callers. Se as ferramentas estiverem adiadas, carregue-as via ToolSearch pelo nome.
+- **Shell (sempre funciona)**: `codegraph explore "<pergunta ou nomes de símbolos>"` e `codegraph node <símbolo-ou-arquivo>`.
+
+Use CodeGraph primeiro para qualquer questão do tipo "onde está X", "como X funciona" ou "o que chama X" — é mais rápido e preciso que um loop de grep/read.
 
 ## What Manifest Is
 
