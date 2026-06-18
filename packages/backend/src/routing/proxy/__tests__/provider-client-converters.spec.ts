@@ -939,6 +939,109 @@ describe('provider-client-converters', () => {
       expect(result).not.toHaveProperty('store');
       expect(result).not.toHaveProperty('service_tier');
     });
+
+    /* ── Azure: max_tokens → max_completion_tokens + reasoning_effort (gpt-5/o-series) ── */
+
+    it('converts max_tokens to max_completion_tokens for classic Azure GPT-5 deployments', () => {
+      const body = { messages: [{ role: 'user', content: 'hi' }], max_tokens: 4096 };
+
+      const result = sanitizeOpenAiBody(body, 'azure-openai-classic', 'gpt-5.4');
+
+      expect(result).toHaveProperty('max_completion_tokens', 4096);
+      expect(result).not.toHaveProperty('max_tokens');
+    });
+
+    it('converts max_tokens to max_completion_tokens for the Azure Foundry endpoint (o-series)', () => {
+      const body = { messages: [], max_tokens: 2048 };
+
+      const result = sanitizeOpenAiBody(body, 'azure', 'o3-mini');
+
+      expect(result).toHaveProperty('max_completion_tokens', 2048);
+      expect(result).not.toHaveProperty('max_tokens');
+    });
+
+    it('does NOT convert max_tokens for non-reasoning Azure deployments (grok/deepseek/kimi)', () => {
+      const body = { messages: [], max_tokens: 4096 };
+
+      const result = sanitizeOpenAiBody(body, 'azure-openai-classic', 'grok-4.3');
+
+      expect(result).toHaveProperty('max_tokens', 4096);
+      expect(result).not.toHaveProperty('max_completion_tokens');
+    });
+
+    it('preserves reasoning_effort for Azure reasoning models', () => {
+      const body = { messages: [], max_tokens: 256, reasoning_effort: 'low' };
+
+      const result = sanitizeOpenAiBody(body, 'azure-openai-classic', 'gpt-5.4');
+
+      expect(result).toHaveProperty('reasoning_effort', 'low');
+      expect(result).toHaveProperty('max_completion_tokens', 256);
+    });
+
+    it('strips sampling params Azure rejects once reasoning is engaged', () => {
+      const body = {
+        messages: [],
+        max_tokens: 256,
+        reasoning_effort: 'low',
+        temperature: 0.7,
+        top_p: 0.9,
+        frequency_penalty: 0.2,
+        presence_penalty: 0.3,
+      };
+
+      const result = sanitizeOpenAiBody(body, 'azure-openai-classic', 'gpt-5.4');
+
+      expect(result).toHaveProperty('reasoning_effort', 'low');
+      expect(result).toHaveProperty('max_completion_tokens', 256);
+      expect(result).not.toHaveProperty('temperature');
+      expect(result).not.toHaveProperty('top_p');
+      expect(result).not.toHaveProperty('frequency_penalty');
+      expect(result).not.toHaveProperty('presence_penalty');
+    });
+
+    it('keeps temperature=1 (the only supported value) when reasoning is engaged', () => {
+      const body = { messages: [], max_tokens: 256, reasoning_effort: 'low', temperature: 1 };
+
+      const result = sanitizeOpenAiBody(body, 'azure-openai-classic', 'gpt-5.4');
+
+      expect(result).toHaveProperty('temperature', 1);
+    });
+
+    it('keeps sampling params for Azure reasoning models when reasoning is NOT engaged', () => {
+      const body = { messages: [], max_tokens: 256, temperature: 0.7, top_p: 0.9 };
+
+      const result = sanitizeOpenAiBody(body, 'azure-openai-classic', 'gpt-5.4');
+
+      expect(result).toHaveProperty('temperature', 0.7);
+      expect(result).toHaveProperty('top_p', 0.9);
+      expect(result).toHaveProperty('max_completion_tokens', 256);
+    });
+
+    it('strips reasoning_effort for non-reasoning Azure deployments', () => {
+      const body = { messages: [], max_tokens: 256, reasoning_effort: 'low' };
+
+      const result = sanitizeOpenAiBody(body, 'azure-openai-classic', 'grok-4.3');
+
+      expect(result).not.toHaveProperty('reasoning_effort');
+      expect(result).toHaveProperty('max_tokens', 256);
+    });
+
+    it('still strips other OpenAI-only fields for Azure GPT-5 while keeping reasoning_effort', () => {
+      const body = {
+        messages: [],
+        max_tokens: 256,
+        store: true,
+        service_tier: 'auto',
+        reasoning_effort: 'medium',
+      };
+
+      const result = sanitizeOpenAiBody(body, 'azure', 'gpt-5');
+
+      expect(result).toHaveProperty('max_completion_tokens', 256);
+      expect(result).toHaveProperty('reasoning_effort', 'medium');
+      expect(result).not.toHaveProperty('store');
+      expect(result).not.toHaveProperty('service_tier');
+    });
   });
 
   describe('createReasoningContentStreamTransformer', () => {
