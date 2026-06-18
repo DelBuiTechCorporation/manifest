@@ -29,6 +29,7 @@ import {
 import { isQwenRegion } from './qwen-region';
 import { getSubscriptionEndpointRegionConfig } from './subscription-region';
 import { isBedrockProvider, isBedrockRegion } from './bedrock-region';
+import { isAzureFoundryProvider, normalizeAzureFoundryEndpoint } from './azure-foundry';
 
 @Controller('api/v1/routing')
 export class ProviderController {
@@ -118,6 +119,19 @@ export class ProviderController {
       } else if (isBedrockProvider(lowerProvider) && (body.authType ?? 'api_key') === 'api_key') {
         if (!isBedrockRegion(body.region)) {
           throw new BadRequestException('AWS Bedrock region must be a valid AWS region code');
+        }
+      } else if (
+        isAzureFoundryProvider(lowerProvider) &&
+        (body.authType ?? 'api_key') === 'api_key'
+      ) {
+        // Azure reuses the `region` field to carry the user-defined endpoint
+        // URL. Validate it here the same way the service layer does, so the
+        // request isn't rejected by the catch-all below before it reaches
+        // ProviderService.resolveProviderRegion.
+        if (!normalizeAzureFoundryEndpoint(body.region)) {
+          throw new BadRequestException(
+            'Azure AI Foundry endpoint must be a valid HTTPS URL ending in .services.ai.azure.com or .openai.azure.com',
+          );
         }
       } else if (subscriptionRegionConfig) {
         if (!subscriptionRegionConfig.isRegion(body.region)) {

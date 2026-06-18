@@ -1,5 +1,3 @@
-import { normalizeProviderBaseUrl } from './provider-base-url';
-
 /**
  * Azure AI Foundry endpoint URL patterns.
  * - New Foundry projects: {name}.services.ai.azure.com
@@ -29,13 +27,22 @@ export function isAzureFoundryEndpoint(value: string | null | undefined): value 
 
 /**
  * Normalize and validate an Azure endpoint URL the user typed in.
- * Strips a trailing slash. Returns null if the URL is not a valid
- * Azure Foundry or Azure OpenAI endpoint.
+ * Reduces the value to its bare origin (scheme + host), discarding any path,
+ * query, or trailing slash — users commonly paste the full API surface such as
+ * `https://{resource}.openai.azure.com/openai/v1`, but the downstream endpoint
+ * templates append the Azure path (`/openai/deployments/…` or `/models/…`)
+ * themselves, so only the origin may be stored. Returns null when the URL is
+ * not a valid HTTPS Azure Foundry or Azure OpenAI endpoint (a non-default port
+ * or embedded credentials are rejected).
  */
 export function normalizeAzureFoundryEndpoint(value: string): string | null {
   try {
-    const normalized = normalizeProviderBaseUrl(value.trim());
-    return isAzureFoundryEndpoint(normalized) ? normalized : null;
+    const url = new URL(value.trim());
+    if (url.protocol !== 'https:' || url.username || url.password || url.port) {
+      return null;
+    }
+    const origin = `https://${url.hostname}`;
+    return isAzureFoundryEndpoint(origin) ? origin : null;
   } catch {
     return null;
   }

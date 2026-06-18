@@ -33,8 +33,12 @@ describe('isAzureFoundryEndpoint', () => {
     );
   });
 
-  it('rejects endpoints with explicit port', () => {
-    expect(isAzureFoundryEndpoint('https://my-project.services.ai.azure.com:443')).toBe(false);
+  it('rejects endpoints with an explicit non-default port', () => {
+    expect(isAzureFoundryEndpoint('https://my-project.services.ai.azure.com:8443')).toBe(false);
+  });
+
+  it('rejects endpoints with a path', () => {
+    expect(isAzureFoundryEndpoint('https://my-resource.openai.azure.com/openai/v1')).toBe(false);
   });
 
   it('rejects null, undefined, and non-string values', () => {
@@ -61,10 +65,34 @@ describe('normalizeAzureFoundryEndpoint', () => {
     );
   });
 
+  it('strips the API path users commonly paste (e.g. /openai/v1)', () => {
+    expect(
+      normalizeAzureFoundryEndpoint('https://delbui-resource.openai.azure.com/openai/v1'),
+    ).toBe('https://delbui-resource.openai.azure.com');
+    expect(
+      normalizeAzureFoundryEndpoint('https://my-project.services.ai.azure.com/models?foo=bar'),
+    ).toBe('https://my-project.services.ai.azure.com');
+  });
+
+  it('canonicalizes away the default https port', () => {
+    expect(normalizeAzureFoundryEndpoint('https://my-resource.openai.azure.com:443')).toBe(
+      'https://my-resource.openai.azure.com',
+    );
+  });
+
   it('returns null for invalid URLs', () => {
     expect(normalizeAzureFoundryEndpoint('http://my-project.services.ai.azure.com')).toBeNull();
     expect(normalizeAzureFoundryEndpoint('https://example.com')).toBeNull();
     expect(normalizeAzureFoundryEndpoint('not-a-url')).toBeNull();
+  });
+
+  it('returns null for endpoints with credentials or a non-default port', () => {
+    expect(
+      normalizeAzureFoundryEndpoint('https://user:pass@my-project.services.ai.azure.com'),
+    ).toBeNull();
+    expect(
+      normalizeAzureFoundryEndpoint('https://my-project.services.ai.azure.com:8443'),
+    ).toBeNull();
   });
 });
 
