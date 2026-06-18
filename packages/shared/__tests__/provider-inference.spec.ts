@@ -195,4 +195,22 @@ describe('resolveProviderMetadataIdentity', () => {
       model: 'glm-5.1',
     });
   });
+
+  it('resolves Azure models to the underlying vendor inferred from the base model', () => {
+    expect(resolveProviderMetadataIdentity('azure', 'gpt-4o')).toEqual({
+      provider: 'openai',
+      model: 'gpt-4o',
+    });
+    expect(resolveProviderMetadataIdentity('azure', 'o3-mini')).toEqual({
+      provider: 'openai',
+      model: 'o3-mini',
+    });
+  });
+
+  it('leaves Azure identities unchanged when the model maps to no known vendor', () => {
+    expect(resolveProviderMetadataIdentity('azure', 'my-custom-deployment')).toEqual({
+      provider: 'azure',
+      model: 'my-custom-deployment',
+    });
+  });
 });

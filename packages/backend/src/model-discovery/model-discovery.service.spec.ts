@@ -1674,6 +1674,48 @@ describe('ModelDiscoveryService', () => {
       );
     });
 
+    it('prices Azure deployments via the underlying base model but keeps the deployment name', async () => {
+      // Deployment id is an opaque handle; pricing/capabilities must resolve via
+      // the underlying base model (azure gpt-4o -> openai gpt-4o), while the UI
+      // still shows the deployment name the user created.
+      mockModelsDevSync.lookupModel.mockImplementation((provider: string, model: string) =>
+        provider === 'openai' && model === 'gpt-4o'
+          ? {
+              inputPricePerToken: 0.0000025,
+              outputPricePerToken: 0.00001,
+              contextWindow: 128000,
+              name: 'GPT-4o',
+              reasoning: false,
+              toolCall: true,
+            }
+          : null,
+      );
+      fetcher.fetch.mockResolvedValue([
+        makeModel({
+          id: 'prod-gpt4o',
+          displayName: 'prod-gpt4o',
+          provider: 'azure',
+          underlyingModel: 'gpt-4o',
+        }),
+      ]);
+
+      const result = await service.discoverModels(
+        makeProvider({
+          provider: 'azure',
+          auth_type: 'api_key',
+          region: 'https://myresource.openai.azure.com',
+        }),
+      );
+
+      expect(mockModelsDevSync.lookupModel).toHaveBeenCalledWith('openai', 'gpt-4o');
+      expect(result[0]).toMatchObject({
+        id: 'prod-gpt4o',
+        displayName: 'prod-gpt4o',
+        inputPricePerToken: 0.0000025,
+        outputPricePerToken: 0.00001,
+      });
+    });
+
     it('should stamp authType as api_key for regular providers', async () => {
       const models = [makeModel({ id: 'gpt-4o' })];
       fetcher.fetch.mockResolvedValue(models);

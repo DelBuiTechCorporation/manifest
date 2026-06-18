@@ -524,24 +524,65 @@ const parseOpencodeZen = createModelParser<OpenAIModelEntry>({
 
 /* ── Provider configs ── */
 
-/* ── Azure AI Foundry ── */
+/* ── Azure AI Foundry / Azure OpenAI ── */
 
-const parseAzureFoundry = createModelParser<OpenAIModelEntry>({
-  arrayKey: 'value',
-  filter: (entry) => typeof entry.id === 'string' && entry.id.length > 0,
-  getId: (entry) => entry.id,
-  getDisplayName: (_entry, id) => id,
-});
+interface AzureDeploymentEntry {
+  id?: unknown;
+  model?: unknown;
+  status?: unknown;
+}
+
+/**
+ * Parse the Azure data-plane "list deployments" response. Each entry is a
+ * deployment the resource actually has — its `id` is the deployment name (what
+ * we send in the chat-completions path) and `model` is the underlying base
+ * model used for pricing/capability enrichment. We deliberately list
+ * deployments, not the `/models` catalog: the catalog returns every base model
+ * available in the region, including ones the account hasn't deployed and
+ * therefore can't call.
+ */
+const parseAzureDeployments = (body: unknown, provider: string): DiscoveredModel[] => {
+  const arr = (body as Record<string, unknown>)?.data;
+  if (!Array.isArray(arr)) return [];
+  const seen = new Set<string>();
+  const models: DiscoveredModel[] = [];
+  for (const raw of arr) {
+    const entry = raw as AzureDeploymentEntry;
+    const id = typeof entry.id === 'string' ? entry.id.trim() : '';
+    if (!id || seen.has(id)) continue;
+    // Skip deployments that can't serve traffic yet (creating / failed / etc).
+    if (typeof entry.status === 'string' && entry.status !== 'succeeded') continue;
+    seen.add(id);
+    const underlying =
+      typeof entry.model === 'string' && entry.model.length > 0 ? entry.model : undefined;
+    models.push({
+      id,
+      displayName: id,
+      provider,
+      contextWindow: DEFAULT_CONTEXT_WINDOW,
+      inputPricePerToken: null,
+      outputPricePerToken: null,
+      capabilityReasoning: false,
+      capabilityCode: false,
+      qualityScore: 3,
+      ...(underlying ? { underlyingModel: underlying } : {}),
+    });
+  }
+  return models;
+};
 
 export const PROVIDER_CONFIGS: Record<string, FetcherConfig> = {
-  // Placeholder endpoint — model fetcher overrides this via endpointOverride (region URL).
+  // Placeholder endpoint — model fetcher overrides this via endpointOverride
+  // (the resource URL stored in the region column). Lists the resource's
+  // deployments, not the region's model catalog.
   azure: {
-    endpoint: 'https://placeholder.services.ai.azure.com/models?api-version=2024-05-01-preview',
+    endpoint:
+      'https://placeholder.openai.azure.com/openai/deployments?api-version=2025-04-01-preview',
     buildHeaders: (key: string) => ({
       'api-key': key,
       'Content-Type': 'application/json',
     }),
-    parse: parseAzureFoundry,
+    parse: parseAzureDeployments,
   },
   openai: {
     endpoint: 'https://api.openai.com/v1/models',
@@ -803,7 +844,9 @@ export class ProviderModelFetcherService {
     } else if (endpointOverride && configKey === 'azure') {
       const azureBaseUrl = normalizeAzureFoundryEndpoint(endpointOverride);
       if (azureBaseUrl) {
-        url = `${azureBaseUrl}/models?api-version=2024-05-01-preview`;
+        // Data-plane "list deployments" (api-key auth) — only the deployments
+        // this resource actually has, never the full catalog.
+        url = `${azureBaseUrl}/openai/deployments?api-version=2025-04-01-preview`;
       } else {
         this.logger.warn('Ignoring invalid Azure AI Foundry endpoint override');
       }

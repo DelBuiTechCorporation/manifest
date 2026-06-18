@@ -101,7 +101,18 @@ export function resolveProviderMetadataIdentity(
   const gateway = resolveUnderlyingModelIdentity(provider, model);
   if (gateway.provider !== provider || gateway.model !== model) return gateway;
 
-  if (provider?.toLowerCase() !== 'bedrock') return { provider, model };
+  const lower = provider?.toLowerCase();
+
+  // Azure hosts other vendors' models (predominantly OpenAI) and has no
+  // catalog of its own. Pricing, capabilities and params belong to the vendor
+  // inferred from the base model id — `azure` + `gpt-4o` resolves to OpenAI's
+  // `gpt-4o`. Falls back to `azure` when the id matches no known vendor.
+  if (lower === 'azure') {
+    const inferred = inferProviderFromModel(model);
+    return inferred ? { provider: inferred, model } : { provider, model };
+  }
+
+  if (lower !== 'bedrock') return { provider, model };
 
   const parts = model.split('.');
   for (let i = 0; i < parts.length - 1; i += 1) {
