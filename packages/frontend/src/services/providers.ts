@@ -433,6 +433,7 @@ export function buildProviderDef(shared: SharedProviderEntry): ProviderDef {
 const PROVIDER_ORDER = [
   'qwen',
   'anthropic',
+  'azure',
   'bedrock',
   'byteplus',
   'commandcode',
