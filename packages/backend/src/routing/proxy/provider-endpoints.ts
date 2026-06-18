@@ -134,7 +134,7 @@ const azureFoundryHeaders = (apiKey: string): Record<string, string> => ({
 const AZURE_FOUNDRY_API_VERSION = '2024-11-01-preview';
 const azureFoundryPath = () => `/models/chat/completions?api-version=${AZURE_FOUNDRY_API_VERSION}`;
 // Azure OpenAI classic — model name is the deployment name in the path.
-const AZURE_OPENAI_API_VERSION = '2024-02-15-preview';
+const AZURE_OPENAI_API_VERSION = '2025-04-01-preview';
 const azureOpenAIPath = (model: string) =>
   `/openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=${AZURE_OPENAI_API_VERSION}`;
 export const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
