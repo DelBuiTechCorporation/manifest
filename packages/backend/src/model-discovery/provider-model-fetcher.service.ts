@@ -574,10 +574,13 @@ const parseAzureDeployments = (body: unknown, provider: string): DiscoveredModel
 export const PROVIDER_CONFIGS: Record<string, FetcherConfig> = {
   // Placeholder endpoint — model fetcher overrides this via endpointOverride
   // (the resource URL stored in the region column). Lists the resource's
-  // deployments, not the region's model catalog.
+  // deployments, not the region's model catalog. NOTE: the deployments-list
+  // endpoint only exists on the legacy `2023-03-15-preview` api-version —
+  // newer versions (e.g. 2025-04-01-preview) return 404 for the list. Verified
+  // against a live resource. Don't "upgrade" this version or discovery breaks.
   azure: {
     endpoint:
-      'https://placeholder.openai.azure.com/openai/deployments?api-version=2025-04-01-preview',
+      'https://placeholder.openai.azure.com/openai/deployments?api-version=2023-03-15-preview',
     buildHeaders: (key: string) => ({
       'api-key': key,
       'Content-Type': 'application/json',
@@ -845,8 +848,9 @@ export class ProviderModelFetcherService {
       const azureBaseUrl = normalizeAzureFoundryEndpoint(endpointOverride);
       if (azureBaseUrl) {
         // Data-plane "list deployments" (api-key auth) — only the deployments
-        // this resource actually has, never the full catalog.
-        url = `${azureBaseUrl}/openai/deployments?api-version=2025-04-01-preview`;
+        // this resource actually has, never the full catalog. The list is only
+        // served on the legacy `2023-03-15-preview` api-version (newer ones 404).
+        url = `${azureBaseUrl}/openai/deployments?api-version=2023-03-15-preview`;
       } else {
         this.logger.warn('Ignoring invalid Azure AI Foundry endpoint override');
       }

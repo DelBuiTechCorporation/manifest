@@ -2631,7 +2631,7 @@ describe('ProviderModelFetcherService', () => {
     );
 
     expect(fetchSpy).toHaveBeenCalledWith(
-      'https://myproject.services.ai.azure.com/openai/deployments?api-version=2025-04-01-preview',
+      'https://myproject.services.ai.azure.com/openai/deployments?api-version=2023-03-15-preview',
       expect.objectContaining({
         headers: expect.objectContaining({ 'api-key': 'my-azure-api-key' }),
       }),
@@ -2661,7 +2661,7 @@ describe('ProviderModelFetcherService', () => {
     );
 
     expect(fetchSpy).toHaveBeenCalledWith(
-      'https://myresource.openai.azure.com/openai/deployments?api-version=2025-04-01-preview',
+      'https://myresource.openai.azure.com/openai/deployments?api-version=2023-03-15-preview',
       expect.anything(),
     );
     expect(result[0]?.id).toBe('gpt-4');
