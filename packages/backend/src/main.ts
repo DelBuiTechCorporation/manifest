@@ -187,7 +187,7 @@ export async function bootstrap() {
   // via the provider client-ID env vars (GOOGLE_CLIENT_ID, etc.) — if those
   // are unset, the social providers are inactive and cannot create accounts.
   if (process.env['DISABLE_REGISTRATION'] === 'true') {
-    expressApp.use('/api/auth/sign-up', (_req, res, _next) => {
+    expressApp.use('/api/auth/sign-up', (_req: express.Request, res: express.Response, _next: express.NextFunction) => {
       res
         .status(403)
         .json({ error: 'Registration is disabled on this instance.' });
