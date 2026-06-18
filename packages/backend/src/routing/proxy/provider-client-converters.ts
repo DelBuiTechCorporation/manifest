@@ -120,9 +120,20 @@ const OPENAI_MAX_COMPLETION_TOKENS_RE = /^(o\d|gpt-5)/i;
  * Endpoints that ultimately hit OpenAI infrastructure and therefore need
  * `max_tokens` rewritten to `max_completion_tokens` for o-series / GPT-5+.
  * Copilot belongs here because GitHub Copilot proxies these models to OpenAI
- * (issue mnfst/manifest#1849).
+ * (issue mnfst/manifest#1849). Azure (both the Foundry unified endpoint and the
+ * classic `*.openai.azure.com` deployment path) hosts the same OpenAI models and
+ * rejects `max_tokens` on gpt-5/o-series with `unsupported_parameter` — verified
+ * against a live resource.
  */
-const OPENAI_MAX_COMPLETION_TOKENS_ENDPOINTS = new Set(['openai', 'copilot']);
+const OPENAI_MAX_COMPLETION_TOKENS_ENDPOINTS = new Set([
+  'openai',
+  'copilot',
+  'azure',
+  'azure-openai-classic',
+]);
+
+/** Azure OpenAI endpoint keys (Foundry unified + classic deployment path). */
+const AZURE_ENDPOINTS = new Set(['azure', 'azure-openai-classic']);
 
 function usesOpenAiMaxCompletionTokens(endpointKey: string, bareModel: string): boolean {
   return (
@@ -356,6 +367,15 @@ export function sanitizeOpenAiBody(
   const needsMaxCompletionTokens = usesOpenAiMaxCompletionTokens(endpointKey, bareForRegex);
   const convertMaxTokens =
     needsMaxCompletionTokens && 'max_tokens' in body && !('max_completion_tokens' in body);
+  // Azure is OpenAI infrastructure and accepts `reasoning_effort` on its
+  // reasoning models — keep it so they actually reason, instead of stripping it
+  // as a generic "OpenAI-only" extra field (Azure isn't a passthrough provider).
+  const keepReasoningEffort = needsMaxCompletionTokens && AZURE_ENDPOINTS.has(endpointKey);
+  // Once reasoning is engaged (`reasoning_effort` set), Azure gpt-5/o-series
+  // reject sampling knobs: top_p / frequency_penalty / presence_penalty aren't
+  // supported at all, and temperature must be the default (1). Agents routinely
+  // send these, so drop the offending ones to avoid a 400. Verified live.
+  const reasoningEngaged = keepReasoningEffort && 'reasoning_effort' in body;
 
   const cleaned: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(body)) {
@@ -370,11 +390,17 @@ export function sanitizeOpenAiBody(
       cleaned['max_completion_tokens'] = value;
       continue;
     }
+    if (reasoningEngaged) {
+      if (key === 'top_p' || key === 'frequency_penalty' || key === 'presence_penalty') continue;
+      if (key === 'temperature' && value !== 1) continue;
+    }
     if (passthroughTopLevel) {
       cleaned[key] = value;
       continue;
     }
-    if (OPENAI_ONLY_FIELDS.has(key)) continue;
+    if (OPENAI_ONLY_FIELDS.has(key) && !(keepReasoningEffort && key === 'reasoning_effort')) {
+      continue;
+    }
     if (key === 'max_completion_tokens') {
       // Preserve max_completion_tokens for endpoints that require it; otherwise
       // downconvert to max_tokens for OpenAI-compatible providers that only know
