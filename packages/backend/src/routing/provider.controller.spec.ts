@@ -623,6 +623,72 @@ describe('ProviderController', () => {
       ).rejects.toThrow('AWS Bedrock region must be a valid AWS region code');
     });
 
+    it('should accept an Azure AI Foundry endpoint URL for API-key auth', async () => {
+      mockProviderService.upsertProvider.mockResolvedValue({
+        provider: {
+          id: 'p1',
+          provider: 'azure',
+          is_active: true,
+          auth_type: 'api_key',
+          region: 'https://delbui-resource.openai.azure.com',
+        },
+        isNew: true,
+      });
+
+      const result = await controller.upsertProvider(mockCtx, mockAgentName, {
+        provider: 'azure',
+        apiKey: 'azure-api-key-test-value',
+        authType: 'api_key',
+        // Users commonly paste the full v1 API surface; the controller must
+        // accept it (the service normalizes it down to the bare origin).
+        region: 'https://delbui-resource.openai.azure.com/openai/v1',
+      });
+
+      expect(mockProviderService.upsertProvider).toHaveBeenCalledWith(
+        TEST_AGENT_ID,
+        'tenant-1',
+        'azure',
+        'azure-api-key-test-value',
+        'api_key',
+        'https://delbui-resource.openai.azure.com/openai/v1',
+        undefined,
+        'user-1',
+      );
+      expect(result.region).toBe('https://delbui-resource.openai.azure.com');
+    });
+
+    it('should reject an invalid Azure AI Foundry endpoint URL', async () => {
+      await expect(
+        controller.upsertProvider(mockCtx, mockAgentName, {
+          provider: 'azure',
+          apiKey: 'azure-api-key-test-value',
+          authType: 'api_key',
+          region: 'https://not-azure.example.com',
+        }),
+      ).rejects.toThrow('Azure AI Foundry endpoint must be a valid HTTPS URL');
+    });
+
+    it('should treat a missing authType as api_key for Azure endpoints', async () => {
+      mockProviderService.upsertProvider.mockResolvedValue({
+        provider: {
+          id: 'p1',
+          provider: 'azure',
+          is_active: true,
+          auth_type: 'api_key',
+          region: 'https://my-project.services.ai.azure.com',
+        },
+        isNew: true,
+      });
+
+      const result = await controller.upsertProvider(mockCtx, mockAgentName, {
+        provider: 'azure',
+        apiKey: 'azure-api-key-test-value',
+        region: 'https://my-project.services.ai.azure.com',
+      });
+
+      expect(result.region).toBe('https://my-project.services.ai.azure.com');
+    });
+
     it('should reject region when MiniMax is connected with api_key auth', async () => {
       await expect(
         controller.upsertProvider(mockCtx, mockAgentName, {
