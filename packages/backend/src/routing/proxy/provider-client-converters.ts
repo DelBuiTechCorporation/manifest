@@ -371,11 +371,18 @@ export function sanitizeOpenAiBody(
   // reasoning models — keep it so they actually reason, instead of stripping it
   // as a generic "OpenAI-only" extra field (Azure isn't a passthrough provider).
   const keepReasoningEffort = needsMaxCompletionTokens && AZURE_ENDPOINTS.has(endpointKey);
-  // Once reasoning is engaged (`reasoning_effort` set), Azure gpt-5/o-series
-  // reject sampling knobs: top_p / frequency_penalty / presence_penalty aren't
-  // supported at all, and temperature must be the default (1). Agents routinely
-  // send these, so drop the offending ones to avoid a 400. Verified live.
-  const reasoningEngaged = keepReasoningEffort && 'reasoning_effort' in body;
+  // Once reasoning is engaged (`reasoning_effort` reaches the model), OpenAI-infra
+  // reasoning models (gpt-5 / o-series) reject sampling knobs: top_p /
+  // frequency_penalty / presence_penalty aren't supported at all, and temperature
+  // must be the default (1). Agents routinely send these, so drop the offending
+  // ones to avoid a 400. Applies where reasoning_effort actually reaches the
+  // model: native OpenAI (passthrough) and Azure (preserved above). Copilot strips
+  // reasoning_effort, so it never enters reasoning mode and keeps accepting these.
+  // The Azure behaviour was verified against a live resource.
+  const reasoningEngaged =
+    'reasoning_effort' in body &&
+    needsMaxCompletionTokens &&
+    (endpointKey === 'openai' || keepReasoningEffort);
 
   const cleaned: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(body)) {

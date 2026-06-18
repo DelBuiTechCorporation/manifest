@@ -1042,6 +1042,49 @@ describe('provider-client-converters', () => {
       expect(result).not.toHaveProperty('store');
       expect(result).not.toHaveProperty('service_tier');
     });
+
+    /* ── Native OpenAI reasoning models share the same constraint ── */
+
+    it('strips reasoning-incompatible sampling params for native OpenAI reasoning models', () => {
+      const body = {
+        messages: [],
+        max_tokens: 256,
+        temperature: 0.7,
+        top_p: 0.9,
+        frequency_penalty: 0.1,
+        presence_penalty: 0.2,
+        reasoning_effort: 'high',
+      };
+
+      const result = sanitizeOpenAiBody(body, 'openai', 'gpt-5');
+
+      expect(result).toHaveProperty('max_completion_tokens', 256);
+      expect(result).toHaveProperty('reasoning_effort', 'high');
+      expect(result).not.toHaveProperty('temperature');
+      expect(result).not.toHaveProperty('top_p');
+      expect(result).not.toHaveProperty('frequency_penalty');
+      expect(result).not.toHaveProperty('presence_penalty');
+    });
+
+    it('keeps sampling params for native OpenAI reasoning models when reasoning is NOT engaged', () => {
+      const body = { messages: [], max_tokens: 256, temperature: 0.7, top_p: 0.9 };
+
+      const result = sanitizeOpenAiBody(body, 'openai', 'gpt-5');
+
+      expect(result).toHaveProperty('temperature', 0.7);
+      expect(result).toHaveProperty('top_p', 0.9);
+      expect(result).toHaveProperty('max_completion_tokens', 256);
+    });
+
+    it('does not strip sampling params for Copilot (reasoning_effort is stripped, so reasoning never engages)', () => {
+      const body = { messages: [], max_tokens: 256, temperature: 0.7, reasoning_effort: 'low' };
+
+      const result = sanitizeOpenAiBody(body, 'copilot', 'gpt-5');
+
+      expect(result).toHaveProperty('max_completion_tokens', 256);
+      expect(result).not.toHaveProperty('reasoning_effort');
+      expect(result).toHaveProperty('temperature', 0.7);
+    });
   });
 
   describe('createReasoningContentStreamTransformer', () => {
