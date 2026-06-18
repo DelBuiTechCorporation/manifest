@@ -2612,11 +2612,14 @@ describe('ProviderModelFetcherService', () => {
     );
   });
 
-  it('should fetch Azure AI Foundry models from the user endpoint URL', async () => {
+  it('should fetch Azure deployments from the user endpoint URL', async () => {
     fetchSpy.mockResolvedValue({
       ok: true,
       json: async () => ({
-        value: [{ id: 'gpt-4o' }, { id: 'o3' }],
+        data: [
+          { id: 'prod-gpt4o', model: 'gpt-4o', object: 'deployment', status: 'succeeded' },
+          { id: 'o3', model: 'o3', object: 'deployment', status: 'succeeded' },
+        ],
       }),
     });
 
@@ -2628,18 +2631,26 @@ describe('ProviderModelFetcherService', () => {
     );
 
     expect(fetchSpy).toHaveBeenCalledWith(
-      'https://myproject.services.ai.azure.com/models?api-version=2024-05-01-preview',
+      'https://myproject.services.ai.azure.com/openai/deployments?api-version=2025-04-01-preview',
       expect.objectContaining({
         headers: expect.objectContaining({ 'api-key': 'my-azure-api-key' }),
       }),
     );
-    expect(result.map((m) => m.id)).toEqual(['gpt-4o', 'o3']);
+    expect(result.map((m) => m.id)).toEqual(['prod-gpt4o', 'o3']);
+    // Deployment name is the routable id; the base model rides along for pricing.
+    expect(result[0]).toMatchObject({
+      id: 'prod-gpt4o',
+      displayName: 'prod-gpt4o',
+      underlyingModel: 'gpt-4o',
+    });
   });
 
-  it('should accept classic Azure OpenAI endpoint for model discovery', async () => {
+  it('should accept classic Azure OpenAI endpoint for deployment discovery', async () => {
     fetchSpy.mockResolvedValue({
       ok: true,
-      json: async () => ({ value: [{ id: 'gpt-4' }] }),
+      json: async () => ({
+        data: [{ id: 'gpt-4', model: 'gpt-4', object: 'deployment', status: 'succeeded' }],
+      }),
     });
 
     const result = await service.fetch(
@@ -2650,16 +2661,57 @@ describe('ProviderModelFetcherService', () => {
     );
 
     expect(fetchSpy).toHaveBeenCalledWith(
-      'https://myresource.openai.azure.com/models?api-version=2024-05-01-preview',
+      'https://myresource.openai.azure.com/openai/deployments?api-version=2025-04-01-preview',
       expect.anything(),
     );
     expect(result[0]?.id).toBe('gpt-4');
   });
 
+  it('should skip non-succeeded deployments, dedupe, and drop blank ids', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          { id: 'ready', model: 'gpt-4o', status: 'succeeded' },
+          { id: 'creating', model: 'gpt-4o', status: 'creating' },
+          { id: 'no-status', model: 'gpt-4o-mini' },
+          { id: 'ready', model: 'gpt-4o', status: 'succeeded' },
+          { id: '   ', model: 'gpt-4o', status: 'succeeded' },
+          { model: 'gpt-4o', status: 'succeeded' },
+        ],
+      }),
+    });
+
+    const result = await service.fetch(
+      'azure',
+      'az-key',
+      'api_key',
+      'https://myresource.openai.azure.com',
+    );
+
+    // 'creating' filtered out, duplicate 'ready' deduped, blank/missing id dropped,
+    // 'no-status' kept (omitted status means usable).
+    expect(result.map((m) => m.id)).toEqual(['ready', 'no-status']);
+    expect(result[1].underlyingModel).toBe('gpt-4o-mini');
+  });
+
+  it('should return no deployments when the response has no data array', async () => {
+    fetchSpy.mockResolvedValue({ ok: true, json: async () => ({}) });
+
+    const result = await service.fetch(
+      'azure',
+      'az-key',
+      'api_key',
+      'https://myresource.openai.azure.com',
+    );
+
+    expect(result).toEqual([]);
+  });
+
   it('should warn and fall back to placeholder when Azure endpoint override is invalid', async () => {
     fetchSpy.mockResolvedValue({
       ok: true,
-      json: async () => ({ value: [] }),
+      json: async () => ({ data: [] }),
     });
 
     const loggerWarnSpy = jest
@@ -2672,7 +2724,7 @@ describe('ProviderModelFetcherService', () => {
       expect.stringContaining('Ignoring invalid Azure AI Foundry endpoint override'),
     );
     expect(fetchSpy).toHaveBeenCalledWith(
-      expect.stringContaining('placeholder.services.ai.azure.com'),
+      expect.stringContaining('placeholder.openai.azure.com'),
       expect.anything(),
     );
     loggerWarnSpy.mockRestore();

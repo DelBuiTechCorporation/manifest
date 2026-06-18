@@ -241,10 +241,15 @@ export class ModelDiscoveryService {
     // narrowing to the two legacy values would drop the 'local' tag that the
     // frontend uses to render the house badge and the Local tab.
     const authType: AuthType = provider.auth_type;
-    const enriched = raw.map((model) => ({
-      ...this.enrichModel(model, provider.provider),
-      authType,
-    }));
+    // Azure deployment ids are user-defined handles; enrichment resolves
+    // pricing via the underlying base model and would relabel each deployment
+    // with that base model's name, hiding which deployment it is (and collapsing
+    // two deployments of the same model to one label). Keep the deployment name.
+    const preserveDisplayName = isAzureFoundryProvider(provider.provider);
+    const enriched = raw.map((model) => {
+      const e = { ...this.enrichModel(model, provider.provider), authType };
+      return preserveDisplayName ? { ...e, displayName: model.displayName } : e;
+    });
 
     // Filter out models confirmed to lack tool support (models.dev toolCall === false).
     // AI agents (OpenClaw, Hermes, SDK-based agents) almost always
@@ -252,7 +257,10 @@ export class ModelDiscoveryService {
     // unusable. Only filter when models.dev has data — if no entry exists we
     // keep the model (we don't know its capabilities).
     const filtered = enriched.filter((model) => {
-      const metadata = resolveProviderMetadataIdentity(provider.provider, model.id);
+      const metadata = resolveProviderMetadataIdentity(
+        provider.provider,
+        model.underlyingModel ?? model.id,
+      );
       const metadataProvider = metadata.provider ?? provider.provider;
       const mdEntry = this.modelsDevSync?.lookupModel(metadataProvider, metadata.model);
       if (mdEntry && mdEntry.toolCall === false) return false;
@@ -529,7 +537,7 @@ export class ModelDiscoveryService {
     // capability flags (reasoning / tool-call) — those drive tier auto-
     // assignment quality scoring and shouldn't be lost just because we
     // overrode the price. Mirrors the price-already-set branch above.
-    const metadata = resolveProviderMetadataIdentity(providerId, model.id);
+    const metadata = resolveProviderMetadataIdentity(providerId, model.underlyingModel ?? model.id);
     const metadataProvider = metadata.provider ?? providerId;
     const metadataModel = metadata.model;
     const isBedrock = providerId.toLowerCase() === 'bedrock';
@@ -621,7 +629,7 @@ export class ModelDiscoveryService {
   /** Merge capability flags from models.dev without touching pricing or display name. */
   private applyCapabilities(model: DiscoveredModel, providerId: string): DiscoveredModel {
     if (!this.modelsDevSync) return model;
-    const metadata = resolveProviderMetadataIdentity(providerId, model.id);
+    const metadata = resolveProviderMetadataIdentity(providerId, model.underlyingModel ?? model.id);
     const metadataProvider = metadata.provider ?? providerId;
     const mdEntry = this.modelsDevSync.lookupModel(metadataProvider, metadata.model);
     if (!mdEntry) return model;

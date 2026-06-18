@@ -29,6 +29,13 @@ export interface DiscoveredModel {
   supportedEndpoints?: readonly string[];
   qualityScore: number;
   authType?: AuthType;
+  /**
+   * Underlying base model id when `id` is an opaque, user-defined handle rather
+   * than a vendor model name — currently Azure deployments, whose `id` is the
+   * deployment name used in the request path while pricing/capabilities belong
+   * to the base model they serve (e.g. deployment `prod-gpt4o` → `gpt-4o`).
+   */
+  underlyingModel?: string;
 }
 
 export interface FetcherConfig {
