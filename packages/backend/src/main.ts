@@ -182,6 +182,18 @@ export async function bootstrap() {
   expressApp.use('/api/auth/verify-email', verifyEmailLimiter);
   expressApp.use('/api/auth/send-verification-email', verifyEmailLimiter);
 
+  // Block new account registration when DISABLE_REGISTRATION=true.
+  // Applies to email/password sign-up. Social OAuth is controlled separately
+  // via the provider client-ID env vars (GOOGLE_CLIENT_ID, etc.) — if those
+  // are unset, the social providers are inactive and cannot create accounts.
+  if (process.env['DISABLE_REGISTRATION'] === 'true') {
+    expressApp.use('/api/auth/sign-up', (_req, res, _next) => {
+      res
+        .status(403)
+        .json({ error: 'Registration is disabled on this instance.' });
+    });
+  }
+
   // Mount Better Auth handler (needs raw body, before express.json)
   const { toNodeHandler } = await import('better-auth/node');
   expressApp.all('/api/auth/*splat', toNodeHandler(auth));

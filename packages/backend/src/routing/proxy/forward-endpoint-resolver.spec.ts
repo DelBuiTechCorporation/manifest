@@ -187,4 +187,53 @@ describe('resolveForwardEndpoint', () => {
     });
     expect(out.customEndpoint).toBeUndefined();
   });
+
+  it('builds Azure AI Foundry endpoint from region URL', () => {
+    const out = resolveForwardEndpoint({
+      provider: 'azure',
+      authType: 'api_key',
+      model: 'gpt-4o',
+      providerRegion: 'https://myproject.services.ai.azure.com',
+    });
+    expect(out.customEndpoint?.baseUrl).toBe('https://myproject.services.ai.azure.com');
+    expect(out.customEndpoint?.buildHeaders('key')['api-key']).toBe('key');
+    expect(out.forwardModel).toBe('gpt-4o');
+  });
+
+  it('builds Azure OpenAI classic endpoint for *.openai.azure.com region URL', () => {
+    const out = resolveForwardEndpoint({
+      provider: 'azure',
+      authType: 'api_key',
+      model: 'gpt-4o',
+      providerRegion: 'https://myresource.openai.azure.com',
+    });
+    expect(out.customEndpoint?.baseUrl).toBe('https://myresource.openai.azure.com');
+    const path = out.customEndpoint?.buildPath('gpt-4o') ?? '';
+    expect(path).toContain('/openai/deployments/gpt-4o/');
+  });
+
+  it('warns when Azure provider has no region URL', () => {
+    const warnMock = jest.fn();
+    const out = resolveForwardEndpoint({
+      provider: 'azure',
+      authType: 'api_key',
+      model: 'gpt-4o',
+      providerRegion: null,
+      logger: { warn: warnMock },
+    });
+    expect(out.customEndpoint).toBeUndefined();
+    expect(warnMock).toHaveBeenCalledWith(
+      expect.stringContaining('Azure AI Foundry provider missing endpoint URL'),
+    );
+  });
+
+  it('accepts azure alias providers', () => {
+    const out = resolveForwardEndpoint({
+      provider: 'azure-openai',
+      authType: 'api_key',
+      model: 'gpt-4o',
+      providerRegion: 'https://myproject.services.ai.azure.com',
+    });
+    expect(out.customEndpoint?.baseUrl).toBe('https://myproject.services.ai.azure.com');
+  });
 });

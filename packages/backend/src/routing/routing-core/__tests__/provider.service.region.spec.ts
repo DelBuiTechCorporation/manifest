@@ -14,6 +14,7 @@ jest.mock('../../qwen-region', () => {
   return { ...actual, detectQwenRegion: jest.fn() };
 });
 
+
 const { detectQwenRegion } = jest.requireMock('../../qwen-region') as {
   detectQwenRegion: jest.Mock;
 };
@@ -110,5 +111,80 @@ describe('ProviderService — Qwen region resolution', () => {
   it('throws when auto-detection yields no region', async () => {
     detectQwenRegion.mockResolvedValue(null);
     await expect(resolve('auto', 'sk-xxx')).rejects.toThrow('Could not auto-detect');
+  });
+});
+
+describe('ProviderService — Azure AI Foundry region resolution', () => {
+  let svc: ProviderService;
+  let originalSecret: string | undefined;
+
+  beforeEach(() => {
+    originalSecret = process.env.BETTER_AUTH_SECRET;
+    process.env.BETTER_AUTH_SECRET = 'a'.repeat(48);
+    svc = new ProviderService(
+      makeRepo() as unknown as Repository<TenantProvider>,
+      makeRepo() as unknown as Repository<TierAssignment>,
+      makeRepo() as unknown as Repository<SpecificityAssignment>,
+      makeRepo() as unknown as Repository<Agent>,
+      makeRepo() as unknown as Repository<HeaderTier>,
+      { getByModel: jest.fn() } as unknown as ModelPricingCacheService,
+      {
+        invalidateAgent: jest.fn(),
+        invalidateTenant: jest.fn(),
+      } as unknown as RoutingCacheService,
+    );
+  });
+
+  afterEach(() => {
+    if (originalSecret === undefined) delete process.env.BETTER_AUTH_SECRET;
+    else process.env.BETTER_AUTH_SECRET = originalSecret;
+  });
+
+  const resolve = (
+    region: string | undefined,
+    existing: Partial<TenantProvider> | null = null,
+  ): Promise<string | null> =>
+    (
+      svc as unknown as {
+        resolveProviderRegion: (
+          p: string,
+          a: string,
+          r: string | undefined,
+          k: string | undefined,
+          e: TenantProvider | null,
+        ) => Promise<string | null>;
+      }
+    ).resolveProviderRegion('azure', 'api_key', region, undefined, existing as TenantProvider | null);
+
+  it('returns the normalized Foundry endpoint URL when provided', async () => {
+    expect(await resolve('https://myproject.services.ai.azure.com/')).toBe(
+      'https://myproject.services.ai.azure.com',
+    );
+  });
+
+  it('accepts classic Azure OpenAI endpoint URLs', async () => {
+    expect(await resolve('https://myresource.openai.azure.com')).toBe(
+      'https://myresource.openai.azure.com',
+    );
+  });
+
+  it('returns the existing endpoint when no region is requested and the stored one is valid', async () => {
+    expect(
+      await resolve(undefined, { region: 'https://myproject.services.ai.azure.com' }),
+    ).toBe('https://myproject.services.ai.azure.com');
+  });
+
+  it('returns null when no region is requested and no valid endpoint is stored', async () => {
+    expect(await resolve(undefined, null)).toBeNull();
+    expect(await resolve(undefined, { region: null })).toBeNull();
+  });
+
+  it('throws BadRequestException for an invalid endpoint URL', async () => {
+    await expect(resolve('http://insecure.services.ai.azure.com')).rejects.toThrow(
+      'Azure AI Foundry endpoint must be a valid HTTPS URL',
+    );
+    await expect(resolve('https://api.openai.com')).rejects.toThrow(
+      'Azure AI Foundry endpoint must be a valid HTTPS URL',
+    );
   });
 });

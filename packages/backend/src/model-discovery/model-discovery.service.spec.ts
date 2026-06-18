@@ -1638,6 +1638,42 @@ describe('ModelDiscoveryService', () => {
       expect(provider.cached_models).toEqual([]);
     });
 
+    it('routes Azure AI Foundry discovery to the user endpoint URL', async () => {
+      fetcher.fetch.mockResolvedValue([makeModel({ id: 'gpt-4o', provider: 'azure' })]);
+
+      const provider = makeProvider({
+        provider: 'azure',
+        auth_type: 'api_key',
+        region: 'https://myproject.services.ai.azure.com',
+      });
+      await service.discoverModels(provider);
+
+      expect(fetcher.fetch).toHaveBeenCalledWith(
+        'azure',
+        'decrypted-key',
+        'api_key',
+        'https://myproject.services.ai.azure.com',
+      );
+    });
+
+    it('routes classic Azure OpenAI discovery to the *.openai.azure.com URL', async () => {
+      fetcher.fetch.mockResolvedValue([makeModel({ id: 'gpt-4', provider: 'azure' })]);
+
+      const provider = makeProvider({
+        provider: 'azure',
+        auth_type: 'api_key',
+        region: 'https://myresource.openai.azure.com',
+      });
+      await service.discoverModels(provider);
+
+      expect(fetcher.fetch).toHaveBeenCalledWith(
+        'azure',
+        'decrypted-key',
+        'api_key',
+        'https://myresource.openai.azure.com',
+      );
+    });
+
     it('should stamp authType as api_key for regular providers', async () => {
       const models = [makeModel({ id: 'gpt-4o' })];
       fetcher.fetch.mockResolvedValue(models);

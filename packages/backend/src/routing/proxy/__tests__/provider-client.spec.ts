@@ -1686,6 +1686,70 @@ describe('ProviderClient', () => {
     });
   });
 
+  describe('Azure AI Foundry provider', () => {
+    it('routes to the Azure Foundry endpoint and preserves model IDs unchanged', async () => {
+      mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+      const azureEndpoint = {
+        baseUrl: 'https://myproject.services.ai.azure.com',
+        buildHeaders: (key: string) => ({ 'api-key': key, 'Content-Type': 'application/json' }),
+        buildPath: () => '/models/chat/completions?api-version=2024-11-01-preview',
+        format: 'openai' as const,
+        includeUsageInStream: true,
+      };
+
+      await client.forward({
+        provider: 'azure',
+        apiKey: 'my-azure-key',
+        model: 'gpt-4o',
+        body,
+        stream: false,
+        authType: 'api_key',
+        customEndpoint: azureEndpoint,
+      });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://myproject.services.ai.azure.com/models/chat/completions?api-version=2024-11-01-preview',
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            'api-key': 'my-azure-key',
+            'Content-Type': 'application/json',
+          }),
+        }),
+      );
+      const sentBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(sentBody.model).toBe('gpt-4o');
+    });
+
+    it('routes classic Azure OpenAI to the deployment path and preserves model ID', async () => {
+      mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+      const classicEndpoint = {
+        baseUrl: 'https://myresource.openai.azure.com',
+        buildHeaders: (key: string) => ({ 'api-key': key, 'Content-Type': 'application/json' }),
+        buildPath: (model: string) =>
+          `/openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=2024-02-15-preview`,
+        format: 'openai' as const,
+        includeUsageInStream: true,
+      };
+
+      await client.forward({
+        provider: 'azure',
+        apiKey: 'classic-azure-key',
+        model: 'gpt-4',
+        body,
+        stream: false,
+        authType: 'api_key',
+        customEndpoint: classicEndpoint,
+      });
+
+      const sentBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(sentBody.model).toBe('gpt-4');
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/openai/deployments/gpt-4/'),
+        expect.anything(),
+      );
+    });
+  });
+
   describe('Kiro subscription provider', () => {
     it('routes to the Kiro AWS JSON event-stream endpoint', async () => {
       mockFetch.mockResolvedValue(

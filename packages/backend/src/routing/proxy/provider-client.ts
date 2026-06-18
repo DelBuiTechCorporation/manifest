@@ -75,7 +75,9 @@ function stripModelPrefix(model: string, endpointKey: string): string {
     endpointKey === 'fireworks' ||
     endpointKey === 'groq' ||
     endpointKey === 'kilo' ||
-    endpointKey === 'nvidia'
+    endpointKey === 'nvidia' ||
+    endpointKey === 'azure' ||
+    endpointKey === 'azure-openai-classic'
   )
     return model;
   return stripVendorPrefix(model);

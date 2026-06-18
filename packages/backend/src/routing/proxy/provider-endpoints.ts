@@ -120,7 +120,41 @@ const chatgptSubscriptionHeaders = (apiKey: string) => ({
   'user-agent': CODEX_CLI_USER_AGENT,
 });
 
+/**
+ * Azure AI Foundry / Azure OpenAI uses `api-key` header authentication.
+ * The base URL is always user-specific — this static entry is a placeholder;
+ * `resolveForwardEndpoint` always overrides it with the stored endpoint URL.
+ */
+const azureFoundryHeaders = (apiKey: string): Record<string, string> => ({
+  'api-key': apiKey,
+  'Content-Type': 'application/json',
+});
+
+// Azure AI Foundry unified endpoint — model name in request body, no deployment in path.
+const AZURE_FOUNDRY_API_VERSION = '2024-11-01-preview';
+const azureFoundryPath = () => `/models/chat/completions?api-version=${AZURE_FOUNDRY_API_VERSION}`;
+// Azure OpenAI classic — model name is the deployment name in the path.
+const AZURE_OPENAI_API_VERSION = '2024-02-15-preview';
+const azureOpenAIPath = (model: string) =>
+  `/openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=${AZURE_OPENAI_API_VERSION}`;
 export const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
+  azure: {
+    // Placeholder — always overridden in resolveForwardEndpoint via region URL.
+    baseUrl: 'https://placeholder.services.ai.azure.com',
+    buildHeaders: azureFoundryHeaders,
+    buildPath: azureFoundryPath,
+    format: 'openai',
+    ...openaiStreamUsage,
+  },
+  'azure-openai-classic': {
+    // Classic Azure OpenAI deployment path. Used when the stored endpoint URL
+    // is *.openai.azure.com (as opposed to *.services.ai.azure.com).
+    baseUrl: 'https://placeholder.openai.azure.com',
+    buildHeaders: azureFoundryHeaders,
+    buildPath: azureOpenAIPath,
+    format: 'openai',
+    ...openaiStreamUsage,
+  },
   openai: {
     baseUrl: 'https://api.openai.com',
     buildHeaders: openaiHeaders,

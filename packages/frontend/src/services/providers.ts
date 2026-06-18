@@ -46,6 +46,17 @@ export interface ProviderDef {
   /** Optional endpoint selector for API-key providers with regional hosts. */
   apiKeyEndpointRegions?: SubscriptionEndpointRegion[];
   /**
+   * Free-text endpoint URL input for API-key providers whose base URL is
+   * user-defined (e.g. Azure AI Foundry resources have per-tenant URLs).
+   * When set, replaces the region dropdown with a text input and the
+   * typed value is sent as the `region` field in the connect payload.
+   */
+  apiKeyEndpointUrlInput?: {
+    label: string;
+    placeholder: string;
+    hint?: string;
+  };
+  /**
    * Optional secondary subscription path. Lets a provider expose a pasted-token
    * shortcut alongside its primary OAuth/device-code flow — currently used so
    * MiniMax users can connect their Coding Plan via an `sk-cp-` token without
@@ -93,6 +104,11 @@ interface ProviderUIOverlay {
   subscriptionAuthMode?: 'popup_oauth' | 'popup_paste' | 'device_code' | 'token';
   subscriptionEndpointRegions?: SubscriptionEndpointRegion[];
   apiKeyEndpointRegions?: SubscriptionEndpointRegion[];
+  apiKeyEndpointUrlInput?: {
+    label: string;
+    placeholder: string;
+    hint?: string;
+  };
   subscriptionTokenAlternative?: {
     prefix: string;
     placeholder: string;
@@ -108,6 +124,16 @@ interface ProviderUIOverlay {
 }
 
 const PROVIDER_UI: Record<string, ProviderUIOverlay> = {
+  azure: {
+    initial: 'Az',
+    subtitle: 'GPT, o-series, Phi, and more via your Azure project',
+    apiKeyEndpointUrlInput: {
+      label: 'Endpoint URL',
+      placeholder: 'https://your-project.services.ai.azure.com',
+      hint: 'Your Azure AI Foundry project endpoint (or Azure OpenAI resource URL)',
+    },
+    models: [],
+  },
   qwen: {
     initial: 'Al',
     subtitle: 'Qwen, DeepSeek, Kimi, GLM via Alibaba Cloud',

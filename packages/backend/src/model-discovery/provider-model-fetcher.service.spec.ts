@@ -19,6 +19,7 @@ describe('ProviderModelFetcherService', () => {
     const expected = [
       'openai',
       'openai-subscription',
+      'azure',
       'bedrock',
       'deepseek',
       'byteplus',
@@ -2609,5 +2610,71 @@ describe('ProviderModelFetcherService', () => {
       expect.stringContaining('api.minimaxi.chat'),
       expect.anything(),
     );
+  });
+
+  it('should fetch Azure AI Foundry models from the user endpoint URL', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        value: [{ id: 'gpt-4o' }, { id: 'o3' }],
+      }),
+    });
+
+    const result = await service.fetch(
+      'azure',
+      'my-azure-api-key',
+      'api_key',
+      'https://myproject.services.ai.azure.com',
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://myproject.services.ai.azure.com/models?api-version=2024-05-01-preview',
+      expect.objectContaining({
+        headers: expect.objectContaining({ 'api-key': 'my-azure-api-key' }),
+      }),
+    );
+    expect(result.map((m) => m.id)).toEqual(['gpt-4o', 'o3']);
+  });
+
+  it('should accept classic Azure OpenAI endpoint for model discovery', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      json: async () => ({ value: [{ id: 'gpt-4' }] }),
+    });
+
+    const result = await service.fetch(
+      'azure',
+      'az-key',
+      'api_key',
+      'https://myresource.openai.azure.com',
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://myresource.openai.azure.com/models?api-version=2024-05-01-preview',
+      expect.anything(),
+    );
+    expect(result[0]?.id).toBe('gpt-4');
+  });
+
+  it('should warn and fall back to placeholder when Azure endpoint override is invalid', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      json: async () => ({ value: [] }),
+    });
+
+    const loggerWarnSpy = jest
+      .spyOn(service['logger'] as unknown as { warn: jest.Mock }, 'warn')
+      .mockImplementation(() => {});
+
+    await service.fetch('azure', 'az-key', 'api_key', 'https://evil.example.com');
+
+    expect(loggerWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Ignoring invalid Azure AI Foundry endpoint override'),
+    );
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining('placeholder.services.ai.azure.com'),
+      expect.anything(),
+    );
+    loggerWarnSpy.mockRestore();
   });
 });

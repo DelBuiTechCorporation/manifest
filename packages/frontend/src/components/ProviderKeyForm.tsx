@@ -84,6 +84,9 @@ const ProviderKeyForm: Component<ProviderKeyFormProps> = (props) => {
   const defaultEndpointRegion = () => endpointRegions()[0]?.value;
   const endpointRegionLabel = (value: string | null | undefined) =>
     endpointRegions().find((region) => region.value === value)?.label;
+  const endpointUrlInputDef = () =>
+    !props.isSubMode() ? props.provDef.apiKeyEndpointUrlInput : undefined;
+  const hasEndpointUrlInput = () => !!endpointUrlInputDef();
   const whereToGetUrl = () =>
     props.isSubMode()
       ? getSubscriptionProviderKeyUrl(props.provId)
@@ -111,6 +114,7 @@ const ProviderKeyForm: Component<ProviderKeyFormProps> = (props) => {
   const isListMode = () => supportsMultiKey() && activeKeys().length > 1;
   const savedEndpointRegion = () => activeKeys()[0]?.region;
   const [selectedEndpointRegion, setSelectedEndpointRegion] = createSignal<string | undefined>();
+  const [endpointUrlValue, setEndpointUrlValue] = createSignal('');
 
   createEffect(() => {
     if (!hasEndpointRegions()) {
@@ -131,8 +135,24 @@ const ProviderKeyForm: Component<ProviderKeyFormProps> = (props) => {
     }
   });
 
+  // Pre-fill the endpoint URL input from the saved region when connected.
+  createEffect(
+    on(
+      () => props.connected(),
+      (connected) => {
+        if (connected && hasEndpointUrlInput()) {
+          setEndpointUrlValue(savedEndpointRegion() ?? '');
+        }
+      },
+    ),
+  );
+
   const displayedEndpointRegion = () => selectedEndpointRegion() ?? defaultEndpointRegion();
   const endpointRegionPayload = () => {
+    if (hasEndpointUrlInput()) {
+      const v = endpointUrlValue().trim();
+      return v || undefined;
+    }
     if (!hasEndpointRegions()) return undefined;
     const selected = selectedEndpointRegion();
     if (selected) return selected;
@@ -156,6 +176,28 @@ const ProviderKeyForm: Component<ProviderKeyFormProps> = (props) => {
             {(region) => <option value={region.value}>{region.label}</option>}
           </For>
         </select>
+      </div>
+    </Show>
+  );
+
+  const EndpointUrlInput = (inputProps: { id: string; disabled?: boolean }) => (
+    <Show when={hasEndpointUrlInput()}>
+      <div class="provider-detail__field">
+        <label class="provider-detail__label" for={inputProps.id}>
+          {endpointUrlInputDef()!.label}
+        </label>
+        <input
+          id={inputProps.id}
+          type="url"
+          class="provider-detail__input"
+          placeholder={endpointUrlInputDef()!.placeholder}
+          value={endpointUrlValue()}
+          disabled={inputProps.disabled}
+          onInput={(e) => setEndpointUrlValue(e.currentTarget.value)}
+        />
+        <Show when={endpointUrlInputDef()!.hint}>
+          <p class="provider-detail__hint">{endpointUrlInputDef()!.hint}</p>
+        </Show>
       </div>
     </Show>
   );
@@ -269,6 +311,7 @@ const ProviderKeyForm: Component<ProviderKeyFormProps> = (props) => {
       {/* Not yet connected — first key */}
       <Show when={!props.connected()}>
         <EndpointRegionSelect id={`${props.provId}-subscription-endpoint`} />
+        <EndpointUrlInput id={`${props.provId}-endpoint-url`} />
         <div class="provider-detail__field">
           <label class="provider-detail__label">{fieldLabel()}</label>
           <input
@@ -381,12 +424,15 @@ const ProviderKeyForm: Component<ProviderKeyFormProps> = (props) => {
                 setOpen={props.setAddKeyOpen}
                 isSubscription={props.isSubMode()}
                 endpointRegions={endpointRegions()}
-                initialEndpointRegion={displayedEndpointRegion()}
+                initialEndpointRegion={
+                  hasEndpointUrlInput() ? endpointUrlValue() : displayedEndpointRegion()
+                }
               />
             </Show>
           </Show>
           <Show when={props.editing()}>
             <EndpointRegionSelect id={`${props.provId}-subscription-endpoint-edit`} />
+            <EndpointUrlInput id={`${props.provId}-endpoint-url-edit`} />
             <input
               class="provider-detail__input provider-detail__input--masked"
               classList={{ 'provider-detail__input--error': !!props.validationError() }}

@@ -14,6 +14,7 @@ import { KiroOauthService } from '../oauth/kiro/kiro-oauth.service';
 import { XaiOauthService } from '../oauth/xai/xai-oauth.service';
 import { ForwardResult } from './provider-client';
 import { SessionMomentumService } from './session-momentum.service';
+import { SessionModelLockService } from './session-model-lock.service';
 import { LimitCheckService } from '../../notifications/services/limit-check.service';
 import { shouldTriggerFallback } from './fallback-status-codes';
 import { Tier, TIERS, ScorerMessage } from '../../scoring/types';
@@ -150,6 +151,7 @@ export class ProxyService {
     private readonly kiroOauth: KiroOauthService,
     private readonly xaiOauth: XaiOauthService,
     private readonly momentum: SessionMomentumService,
+    private readonly sessionLock: SessionModelLockService,
     private readonly limitCheck: LimitCheckService,
     private readonly fallbackService: ProxyFallbackService,
     private readonly config: ConfigService,
@@ -186,6 +188,22 @@ export class ProxyService {
       specificityOverride,
       headers,
     );
+
+    // Apply session model lock to preserve LLM prompt-cache across turns.
+    // On a cache hit the locked route/tier replaces the freshly scored ones;
+    // on a miss the new route is locked so future turns can reuse it.
+    if (resolved.route && resolved.tier && (TIERS as readonly string[]).includes(resolved.tier)) {
+      const scoredTier = resolved.tier as Tier;
+      const locked = this.sessionLock.getLockedRoute(sessionKey, agentId, scoredTier);
+      if (locked) {
+        resolved.route = locked.route;
+        resolved.tier = locked.tier;
+        resolved.reason = 'session_lock';
+      } else {
+        this.sessionLock.tryLock(sessionKey, agentId, scoredTier, resolved.route);
+      }
+    }
+
     const responseMode = resolved.response_mode ?? DEFAULT_RESPONSE_MODE;
     const stream = body.stream === true || responseMode === 'stream';
     if (!resolved.route) {

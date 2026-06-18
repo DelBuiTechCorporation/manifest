@@ -1131,6 +1131,163 @@ describe('ProviderKeyForm', () => {
     });
   });
 
+  describe('endpoint URL input (Azure-style providers)', () => {
+    function makeAzureDef(): ProviderDef {
+      return makeProviderDef({
+        id: 'azure',
+        name: 'Azure AI Foundry',
+        keyPlaceholder: 'Azure API key',
+        apiKeyEndpointUrlInput: {
+          label: 'Endpoint URL',
+          placeholder: 'https://your-project.services.ai.azure.com',
+          hint: 'Your Azure AI Foundry project endpoint',
+        },
+      });
+    }
+
+    it('renders the URL text input instead of a region select', () => {
+      const def = makeAzureDef();
+      const { container } = mount({ provDef: def, provId: 'azure' });
+      const urlInput = container.querySelector('#azure-endpoint-url') as HTMLInputElement;
+      expect(urlInput).not.toBeNull();
+      expect(urlInput.type).toBe('url');
+      expect(urlInput.placeholder).toBe('https://your-project.services.ai.azure.com');
+      expect(container.querySelector('#azure-subscription-endpoint')).toBeNull();
+    });
+
+    it('renders the hint text when provided', () => {
+      const def = makeAzureDef();
+      const { container } = mount({ provDef: def, provId: 'azure' });
+      const hint = container.querySelector('.provider-detail__hint');
+      expect(hint).not.toBeNull();
+      expect(hint!.textContent).toContain('Your Azure AI Foundry project endpoint');
+    });
+
+    it('sends the URL as region on connect', async () => {
+      const def = makeAzureDef();
+      const { container } = mount({
+        provDef: def,
+        provId: 'azure',
+        keyInput: 'azure-api-key-test',
+      });
+
+      const urlInput = container.querySelector('#azure-endpoint-url') as HTMLInputElement;
+      fireEvent.input(urlInput, {
+        target: { value: 'https://myproject.services.ai.azure.com' },
+      });
+
+      const connectBtn = container.querySelector('.provider-detail__action') as HTMLButtonElement;
+      fireEvent.click(connectBtn);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(connectProviderMock).toHaveBeenCalledWith('test-agent', {
+        provider: 'azure',
+        apiKey: 'azure-api-key-test',
+        authType: 'api_key',
+        region: 'https://myproject.services.ai.azure.com',
+      });
+    });
+
+    it('omits region when URL field is empty on connect', async () => {
+      const def = makeAzureDef();
+      const { container } = mount({
+        provDef: def,
+        provId: 'azure',
+        keyInput: 'azure-api-key-test',
+      });
+
+      const connectBtn = container.querySelector('.provider-detail__action') as HTMLButtonElement;
+      fireEvent.click(connectBtn);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(connectProviderMock).toHaveBeenCalledWith('test-agent', {
+        provider: 'azure',
+        apiKey: 'azure-api-key-test',
+        authType: 'api_key',
+      });
+    });
+
+    it('passes the Azure URL as region when adding a second key via AddAnotherKeyAction', async () => {
+      const def = makeAzureDef();
+      const onUpdate = vi.fn();
+      const { container, getByText } = mount({
+        provDef: def,
+        provId: 'azure',
+        connected: true,
+        addKeyOpen: true,
+        onUpdate,
+        providers: [
+          {
+            id: 'az1',
+            provider: 'azure',
+            auth_type: 'api_key' as const,
+            is_active: true,
+            has_api_key: true,
+            key_prefix: 'az-***',
+            label: 'Default',
+            priority: 0,
+            region: 'https://myproject.services.ai.azure.com',
+            connected_at: '2026-06-17',
+          },
+        ],
+      });
+
+      // The add-key form is open (addKeyOpen: true). Azure has no region
+      // dropdown — verify that #add-key-endpoint select does NOT render.
+      expect(container.querySelector('#add-key-endpoint')).toBeNull();
+
+      // Enter a new API key in the add-key form.
+      const apiKeyInput = container.querySelector('input[placeholder="Azure API key"]') as HTMLInputElement;
+      fireEvent.input(apiKeyInput, { target: { value: 'az-second-key' } });
+      fireEvent.click(getByText('Add key'));
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // The region passed to connectProvider should be the URL from the first key.
+      expect(connectProviderMock).toHaveBeenCalledWith('test-agent', expect.objectContaining({
+        provider: 'azure',
+        apiKey: 'az-second-key',
+        authType: 'api_key',
+        region: 'https://myproject.services.ai.azure.com',
+      }));
+    });
+
+    it('pre-fills the URL from saved region when connected', () => {
+      const def = makeAzureDef();
+      const { container } = mount({
+        provDef: def,
+        provId: 'azure',
+        connected: true,
+        providers: [
+          {
+            id: 'az1',
+            provider: 'azure',
+            auth_type: 'api_key' as const,
+            is_active: true,
+            has_api_key: true,
+            key_prefix: 'az-***',
+            label: 'Default',
+            priority: 0,
+            region: 'https://myproject.services.ai.azure.com',
+            connected_at: '2026-06-17',
+          },
+        ],
+      });
+
+      // The editing URL input renders after clicking Change.
+      const changeBtn = container.querySelector('.btn--outline') as HTMLButtonElement;
+      fireEvent.click(changeBtn);
+
+      const urlEditInput = container.querySelector(
+        '#azure-endpoint-url-edit',
+      ) as HTMLInputElement;
+      expect(urlEditInput).not.toBeNull();
+      expect(urlEditInput.value).toBe('https://myproject.services.ai.azure.com');
+    });
+  });
+
   describe('AddAnotherKeyAction (uncontrolled open)', () => {
     function mountAction(overrides: { isSubscription?: boolean } = {}) {
       const [busy, setBusy] = createSignal(false);

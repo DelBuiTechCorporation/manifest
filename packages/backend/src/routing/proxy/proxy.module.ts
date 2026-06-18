@@ -22,6 +22,7 @@ import { ProxyRateLimiter } from './proxy-rate-limiter';
 import { ProxyMessageRecorder } from './proxy-message-recorder';
 import { ProxyMessageDedup } from './proxy-message-dedup';
 import { SessionMomentumService } from './session-momentum.service';
+import { SessionModelLockService } from './session-model-lock.service';
 import { CopilotTokenService } from './copilot-token.service';
 import { ThoughtSignatureCache } from './thought-signature-cache';
 import { ThinkingBlockCache } from './thinking-block-cache';
@@ -56,6 +57,7 @@ import { ProxyExceptionFilter } from './proxy-exception.filter';
     ProxyMessageRecorder,
     ProxyMessageDedup,
     SessionMomentumService,
+    SessionModelLockService,
     CopilotTokenService,
     ThoughtSignatureCache,
     ThinkingBlockCache,

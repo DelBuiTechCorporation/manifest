@@ -26,6 +26,7 @@ import {
   isXiaomiTokenPlanRegion,
 } from '../routing/xiaomi-region';
 import { getZaiCodingPlanBaseUrl } from '../routing/zai-region';
+import { isAzureFoundryEndpoint, isAzureFoundryProvider } from '../routing/azure-foundry';
 import { CopilotTokenService } from '../routing/proxy/copilot-token.service';
 import {
   findOpenRouterPrefix,
@@ -162,6 +163,9 @@ export class ModelDiscoveryService {
       isXiaomiTokenPlanRegion(provider.region)
     ) {
       endpointOverride = getXiaomiTokenPlanBaseUrl(provider.region);
+    }
+    if (isAzureFoundryProvider(provider.provider) && isAzureFoundryEndpoint(provider.region)) {
+      endpointOverride = provider.region;
     }
 
     let raw: DiscoveredModel[];

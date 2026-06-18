@@ -29,6 +29,7 @@ import {
   isXiaomiTokenPlanRegion,
 } from '../xiaomi-region';
 import { getZaiCodingPlanBaseUrl } from '../zai-region';
+import { isAzureFoundryEndpoint, isAzureFoundryProvider } from '../azure-foundry';
 
 const XIAOMI_MODEL_PREFIXES = ['xiaomi/', 'mimo/', 'xiaomi-mimo/'] as const;
 
@@ -148,6 +149,15 @@ export function resolveForwardEndpoint(
       getXiaomiTokenPlanBaseUrl(providerRegion),
       'xiaomi-subscription',
     );
+  } else if (isAzureFoundryProvider(lower) && isAzureFoundryEndpoint(providerRegion)) {
+    // Azure AI Foundry: the `region` column stores the user's endpoint URL.
+    // Foundry projects use the unified /models/chat/completions path; classic
+    // Azure OpenAI resources use the /openai/deployments/{model} path.
+    const isClassic = providerRegion.includes('.openai.azure.com');
+    const templateKey = isClassic ? 'azure-openai-classic' : 'azure';
+    customEndpoint = buildEndpointOverride(providerRegion, templateKey);
+  } else if (isAzureFoundryProvider(lower) && !providerRegion) {
+    logger?.warn(`Azure AI Foundry provider missing endpoint URL in region field`);
   }
 
   return { customEndpoint, forwardModel };

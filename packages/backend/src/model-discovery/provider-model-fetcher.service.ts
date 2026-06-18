@@ -17,6 +17,7 @@ import {
   normalizeXiaomiTokenPlanBaseUrl,
 } from '../routing/xiaomi-region';
 import { getZaiCodingPlanBaseUrl, normalizeZaiCodingPlanBaseUrl } from '../routing/zai-region';
+import { normalizeAzureFoundryEndpoint } from '../routing/azure-foundry';
 import { OpencodeGoCatalogService } from './opencode-go-catalog.service';
 import {
   buildKiroHeaders,
@@ -523,7 +524,25 @@ const parseOpencodeZen = createModelParser<OpenAIModelEntry>({
 
 /* ── Provider configs ── */
 
+/* ── Azure AI Foundry ── */
+
+const parseAzureFoundry = createModelParser<OpenAIModelEntry>({
+  arrayKey: 'value',
+  filter: (entry) => typeof entry.id === 'string' && entry.id.length > 0,
+  getId: (entry) => entry.id,
+  getDisplayName: (_entry, id) => id,
+});
+
 export const PROVIDER_CONFIGS: Record<string, FetcherConfig> = {
+  // Placeholder endpoint — model fetcher overrides this via endpointOverride (region URL).
+  azure: {
+    endpoint: 'https://placeholder.services.ai.azure.com/models?api-version=2024-05-01-preview',
+    buildHeaders: (key: string) => ({
+      'api-key': key,
+      'Content-Type': 'application/json',
+    }),
+    parse: parseAzureFoundry,
+  },
   openai: {
     endpoint: 'https://api.openai.com/v1/models',
     buildHeaders: bearerHeaders,
@@ -780,6 +799,13 @@ export class ProviderModelFetcherService {
         url = `${xiaomiBaseUrl}/v1/models`;
       } else {
         this.logger.warn('Ignoring invalid Xiaomi MiMo Token Plan endpoint override');
+      }
+    } else if (endpointOverride && configKey === 'azure') {
+      const azureBaseUrl = normalizeAzureFoundryEndpoint(endpointOverride);
+      if (azureBaseUrl) {
+        url = `${azureBaseUrl}/models?api-version=2024-05-01-preview`;
+      } else {
+        this.logger.warn('Ignoring invalid Azure AI Foundry endpoint override');
       }
     }
 

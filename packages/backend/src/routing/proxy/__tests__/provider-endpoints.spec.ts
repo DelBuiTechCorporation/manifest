@@ -765,3 +765,47 @@ describe('gemini-subscription endpoint', () => {
     expect(ep.buildStreamPath!('gemini-2.5-pro')).toBe('/v1internal:streamGenerateContent');
   });
 });
+
+describe('Azure AI Foundry endpoints', () => {
+  it('azure endpoint uses api-key header', () => {
+    const ep = PROVIDER_ENDPOINTS['azure'];
+    const headers = ep.buildHeaders('my-key');
+    expect(headers['api-key']).toBe('my-key');
+    expect(headers['Authorization']).toBeUndefined();
+  });
+
+  it('azure endpoint buildPath includes Foundry path and api-version', () => {
+    const ep = PROVIDER_ENDPOINTS['azure'];
+    const path = ep.buildPath('gpt-4o');
+    expect(path).toContain('/models/chat/completions');
+    expect(path).toContain('api-version=');
+  });
+
+  it('azure endpoint uses openai format', () => {
+    expect(PROVIDER_ENDPOINTS['azure'].format).toBe('openai');
+  });
+
+  it('azure-openai-classic endpoint buildPath includes deployment name', () => {
+    const ep = PROVIDER_ENDPOINTS['azure-openai-classic'];
+    const path = ep.buildPath('gpt-4o');
+    expect(path).toContain('/openai/deployments/gpt-4o/chat/completions');
+    expect(path).toContain('api-version=');
+  });
+
+  it('buildEndpointOverride creates Azure Foundry endpoint with custom base URL', () => {
+    const ep = buildEndpointOverride('https://myproject.services.ai.azure.com', 'azure');
+    expect(ep.baseUrl).toBe('https://myproject.services.ai.azure.com');
+    expect(ep.buildHeaders('key123')['api-key']).toBe('key123');
+    expect(ep.requiresSsrfRevalidation).toBe(true);
+  });
+
+  it('buildEndpointOverride creates Azure OpenAI classic endpoint with custom base URL', () => {
+    const ep = buildEndpointOverride(
+      'https://myresource.openai.azure.com',
+      'azure-openai-classic',
+    );
+    expect(ep.baseUrl).toBe('https://myresource.openai.azure.com');
+    const path = ep.buildPath('gpt-35-turbo');
+    expect(path).toContain('/openai/deployments/gpt-35-turbo/');
+  });
+});

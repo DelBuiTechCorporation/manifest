@@ -33,6 +33,11 @@ import {
   getSubscriptionEndpointRegionConfig,
   SubscriptionEndpointRegionConfig,
 } from '../subscription-region';
+import {
+  isAzureFoundryEndpoint,
+  isAzureFoundryProvider,
+  normalizeAzureFoundryEndpoint,
+} from '../azure-foundry';
 
 const MAX_KEYS_PER_PROVIDER = 5;
 const MAX_LABEL_LENGTH = 50;
@@ -518,6 +523,19 @@ export class ProviderService {
       const detectedRegion = detectBedrockRegionFromApiKey(apiKey);
       if (detectedRegion) return detectedRegion;
       return isBedrockRegion(existing?.region) ? existing.region : DEFAULT_BEDROCK_REGION;
+    }
+
+    if (isAzureFoundryProvider(lower) && authType === 'api_key') {
+      if (requestedRegion === undefined) {
+        return isAzureFoundryEndpoint(existing?.region) ? existing.region : null;
+      }
+      const normalized = normalizeAzureFoundryEndpoint(requestedRegion);
+      if (!normalized) {
+        throw new BadRequestException(
+          'Azure AI Foundry endpoint must be a valid HTTPS URL ending in .services.ai.azure.com or .openai.azure.com',
+        );
+      }
+      return normalized;
     }
 
     const isQwenProvider = lower === 'qwen' || lower === 'alibaba';

@@ -45,6 +45,18 @@ export interface SharedProviderEntry {
 
 export const SHARED_PROVIDERS: readonly SharedProviderEntry[] = [
   {
+    id: 'azure',
+    displayName: 'Azure AI Foundry',
+    aliases: ['azure-openai', 'azure openai', 'azureopenai', 'azure-ai', 'azure ai'],
+    openRouterPrefixes: [],
+    requiresApiKey: true,
+    localOnly: false,
+    color: '#0078d4',
+    keyPrefix: '',
+    minKeyLength: 20,
+    keyPlaceholder: 'Azure AI Foundry API key',
+  },
+  {
     id: 'qwen',
     displayName: 'Alibaba Cloud',
     aliases: ['alibaba'],

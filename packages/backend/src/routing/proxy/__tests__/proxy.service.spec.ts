@@ -17,6 +17,7 @@ import type { GeminiOauthService } from '../../oauth/gemini/gemini-oauth.service
 import type { KiroOauthService } from '../../oauth/kiro/kiro-oauth.service';
 import type { XaiOauthService } from '../../oauth/xai/xai-oauth.service';
 import type { SessionMomentumService } from '../session-momentum.service';
+import type { SessionModelLockService } from '../session-model-lock.service';
 import type { LimitCheckService } from '../../../notifications/services/limit-check.service';
 import type { ProxyFallbackService } from '../proxy-fallback.service';
 import type { ThoughtSignatureCache } from '../thought-signature-cache';
@@ -86,6 +87,7 @@ describe('ProxyService — orchestration', () => {
       'recordTier' | 'recordCategory' | 'getRecentTiers' | 'getRecentCategories'
     >
   >;
+  let sessionLock: jest.Mocked<Pick<SessionModelLockService, 'getLockedRoute' | 'tryLock'>>;
   let limitCheck: jest.Mocked<Pick<LimitCheckService, 'checkLimits'>>;
   let fallbackService: jest.Mocked<
     Pick<ProxyFallbackService, 'tryForwardToProvider' | 'tryFallbacks'>
@@ -132,6 +134,10 @@ describe('ProxyService — orchestration', () => {
       getRecentTiers: jest.fn().mockReturnValue([]),
       getRecentCategories: jest.fn().mockReturnValue([]),
     };
+    sessionLock = {
+      getLockedRoute: jest.fn().mockReturnValue(null),
+      tryLock: jest.fn(),
+    };
     limitCheck = { checkLimits: jest.fn().mockResolvedValue(null) };
     fallbackService = {
       tryForwardToProvider: jest.fn(),
@@ -170,6 +176,7 @@ describe('ProxyService — orchestration', () => {
       kiroOauth as unknown as KiroOauthService,
       xaiOauth as unknown as XaiOauthService,
       momentum as unknown as SessionMomentumService,
+      sessionLock as unknown as SessionModelLockService,
       limitCheck as unknown as LimitCheckService,
       fallbackService as unknown as ProxyFallbackService,
       configService,
@@ -1320,6 +1327,99 @@ describe('ProxyService — orchestration', () => {
       expect((scoringMessages as Array<{ role: string }>).every((m) => m.role === 'user')).toBe(
         true,
       );
+    });
+  });
+
+  describe('session model lock', () => {
+    const resolvedRoute = () => route('anthropic', 'api_key', 'claude-sonnet-4-5');
+
+    beforeEach(() => {
+      fallbackService.tryForwardToProvider.mockResolvedValue({
+        response: okResponse(200),
+        isGoogle: false,
+        isAnthropic: true,
+        isChatGpt: false,
+      });
+    });
+
+    it('locks the resolved route on first request (no existing lock)', async () => {
+      resolveService.resolve.mockResolvedValue({
+        tier: 'complex',
+        route: resolvedRoute(),
+        fallback_routes: null,
+        confidence: 0.85,
+        score: 8,
+        reason: 'scored',
+      });
+      sessionLock.getLockedRoute.mockReturnValue(null);
+
+      await svc.proxyRequest(baseOpts());
+
+      expect(sessionLock.getLockedRoute).toHaveBeenCalledWith('sess-1', 'agent-1', 'complex');
+      expect(sessionLock.tryLock).toHaveBeenCalledWith(
+        'sess-1',
+        'agent-1',
+        'complex',
+        resolvedRoute(),
+      );
+    });
+
+    it('uses the locked route when scored tier is within ±1', async () => {
+      const lockedRoute = route('anthropic', 'api_key', 'claude-haiku-4-5');
+      resolveService.resolve.mockResolvedValue({
+        tier: 'standard',
+        route: resolvedRoute(),
+        fallback_routes: null,
+        confidence: 0.7,
+        score: 4,
+        reason: 'scored',
+      });
+      sessionLock.getLockedRoute.mockReturnValue({ route: lockedRoute, tier: 'simple' });
+
+      const result = await svc.proxyRequest(baseOpts());
+
+      expect(sessionLock.tryLock).not.toHaveBeenCalled();
+      expect(result.meta.model).toBe('claude-haiku-4-5');
+      expect(result.meta.tier).toBe('simple');
+    });
+
+    it('records routing reason as session_lock when the lock is applied', async () => {
+      const lockedRoute = route('openai', 'api_key', 'gpt-4o');
+      resolveService.resolve.mockResolvedValue({
+        tier: 'standard',
+        route: route('openai', 'api_key', 'gpt-4o-mini'),
+        fallback_routes: null,
+        confidence: 0.5,
+        score: 3,
+        reason: 'scored',
+      });
+      sessionLock.getLockedRoute.mockReturnValue({ route: lockedRoute, tier: 'standard' });
+      fallbackService.tryForwardToProvider.mockResolvedValue({
+        response: okResponse(200),
+        isGoogle: false,
+        isAnthropic: false,
+        isChatGpt: false,
+      });
+
+      const result = await svc.proxyRequest(baseOpts());
+
+      expect(result.meta.reason).toBe('session_lock');
+    });
+
+    it('does not apply lock for non-scoring tiers', async () => {
+      resolveService.resolve.mockResolvedValue({
+        tier: 'default',
+        route: resolvedRoute(),
+        fallback_routes: null,
+        confidence: 1,
+        score: 0,
+        reason: 'specificity',
+      });
+
+      await svc.proxyRequest(baseOpts());
+
+      expect(sessionLock.getLockedRoute).not.toHaveBeenCalled();
+      expect(sessionLock.tryLock).not.toHaveBeenCalled();
     });
   });
 });
