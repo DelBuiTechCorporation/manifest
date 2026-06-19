@@ -117,6 +117,16 @@ const DEEPSEEK_MAX_TOKENS_LIMIT = 8192;
 const OPENAI_MAX_COMPLETION_TOKENS_RE = /^(o\d|gpt-5)/i;
 
 /**
+ * True when the model name is an OpenAI reasoning-family model (gpt-5 / o-series)
+ * — the family that uses `max_completion_tokens` and accepts `reasoning_effort`.
+ * A leading vendor prefix (e.g. `openai/`) is stripped before matching.
+ */
+export function isOpenAiReasoningModelName(model: string): boolean {
+  const bare = model.includes('/') ? model.substring(model.indexOf('/') + 1) : model;
+  return OPENAI_MAX_COMPLETION_TOKENS_RE.test(bare);
+}
+
+/**
  * Endpoints that ultimately hit OpenAI infrastructure and therefore need
  * `max_tokens` rewritten to `max_completion_tokens` for o-series / GPT-5+.
  * Copilot belongs here because GitHub Copilot proxies these models to OpenAI

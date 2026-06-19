@@ -1776,6 +1776,188 @@ describe('ProviderClient', () => {
     });
   });
 
+  describe('Azure OpenAI → Responses API rerouting (tools + reasoning_effort)', () => {
+    // gpt-5.5 / gpt-5.3-codex reject function tools + reasoning_effort together
+    // on /chat/completions ("Please use /v1/responses instead"). The proxy must
+    // detect that exact shape and forward through Azure's Responses API. Verified
+    // against a live Azure resource.
+    const azureClassic = () =>
+      buildEndpointOverride('https://myresource.openai.azure.com', 'azure-openai-classic');
+    const reasoningToolBody = {
+      messages: [
+        { role: 'system', content: 'You are helpful.' },
+        { role: 'user', content: 'Weather in Paris? Use the tool.' },
+      ],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: 'get_weather',
+            description: 'Get weather',
+            parameters: { type: 'object', properties: { city: { type: 'string' } } },
+          },
+        },
+      ],
+      reasoning_effort: 'low',
+      temperature: 0.7,
+      top_p: 0.9,
+      max_tokens: 512,
+    };
+
+    it('reroutes to /openai/responses and converts the body when tools + reasoning_effort are present', async () => {
+      mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+
+      const result = await client.forward({
+        provider: 'azure',
+        apiKey: 'classic-azure-key',
+        model: 'gpt-5.5',
+        body: reasoningToolBody,
+        stream: false,
+        authType: 'api_key',
+        customEndpoint: azureClassic(),
+      });
+
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe(
+        'https://myresource.openai.azure.com/openai/responses?api-version=2025-04-01-preview',
+      );
+      expect(init.headers).toMatchObject({ 'api-key': 'classic-azure-key' });
+
+      const sentBody = JSON.parse(init.body);
+      // Deployment name travels in the body for the Responses path.
+      expect(sentBody.model).toBe('gpt-5.5');
+      expect(Array.isArray(sentBody.input)).toBe(true);
+      // reasoning_effort → reasoning.effort
+      expect(sentBody.reasoning).toEqual({ effort: 'low' });
+      // tools flattened to the Responses shape (no nested `function`).
+      expect(sentBody.tools).toEqual([
+        {
+          type: 'function',
+          name: 'get_weather',
+          description: 'Get weather',
+          parameters: { type: 'object', properties: { city: { type: 'string' } } },
+        },
+      ]);
+      // max_tokens → max_output_tokens.
+      expect(sentBody.max_output_tokens).toBe(512);
+      // Sampling knobs are not part of the Responses request.
+      expect(sentBody).not.toHaveProperty('temperature');
+      expect(sentBody).not.toHaveProperty('top_p');
+      // The caller must convert the Responses-shaped reply back to Chat Completions.
+      expect(result.isChatGpt).toBe(true);
+    });
+
+    it('keeps streaming on the Responses path when the caller streams', async () => {
+      mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+
+      await client.forward({
+        provider: 'azure',
+        apiKey: 'classic-azure-key',
+        model: 'gpt-5.3-codex',
+        body: { ...reasoningToolBody, stream: true },
+        stream: true,
+        authType: 'api_key',
+        customEndpoint: azureClassic(),
+      });
+
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toContain('/openai/responses');
+      expect(JSON.parse(init.body).stream).toBe(true);
+    });
+
+    it('does NOT reroute when reasoning_effort is present but there are no tools', async () => {
+      mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+      const { tools, ...noTools } = reasoningToolBody;
+      void tools;
+
+      await client.forward({
+        provider: 'azure',
+        apiKey: 'classic-azure-key',
+        model: 'gpt-5.5',
+        body: noTools,
+        stream: false,
+        authType: 'api_key',
+        customEndpoint: azureClassic(),
+      });
+
+      expect(mockFetch.mock.calls[0][0]).toContain('/openai/deployments/gpt-5.5/chat/completions');
+    });
+
+    it('does NOT reroute when tools are present but there is no reasoning_effort', async () => {
+      mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+      const { reasoning_effort, ...noEffort } = reasoningToolBody;
+      void reasoning_effort;
+
+      await client.forward({
+        provider: 'azure',
+        apiKey: 'classic-azure-key',
+        model: 'gpt-5.5',
+        body: noEffort,
+        stream: false,
+        authType: 'api_key',
+        customEndpoint: azureClassic(),
+      });
+
+      expect(mockFetch.mock.calls[0][0]).toContain('/openai/deployments/gpt-5.5/chat/completions');
+    });
+
+    it('does NOT reroute a non-reasoning deployment (no /responses for grok et al.)', async () => {
+      mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+
+      await client.forward({
+        provider: 'azure',
+        apiKey: 'classic-azure-key',
+        model: 'grok-4.3',
+        body: reasoningToolBody,
+        stream: false,
+        authType: 'api_key',
+        customEndpoint: azureClassic(),
+      });
+
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toContain('/openai/deployments/grok-4.3/chat/completions');
+      // reasoning_effort is stripped for non-reasoning Azure deployments.
+      expect(JSON.parse(init.body)).not.toHaveProperty('reasoning_effort');
+    });
+
+    it('does NOT reroute the Foundry unified endpoint (only the classic path is validated)', async () => {
+      mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+      const foundry = buildEndpointOverride('https://myproject.services.ai.azure.com', 'azure');
+
+      await client.forward({
+        provider: 'azure',
+        apiKey: 'foundry-key',
+        model: 'gpt-5.5',
+        body: reasoningToolBody,
+        stream: false,
+        authType: 'api_key',
+        customEndpoint: foundry,
+      });
+
+      expect(mockFetch.mock.calls[0][0]).toContain('/models/chat/completions');
+    });
+
+    it('does NOT reroute when the inbound request is already Responses-shaped', async () => {
+      mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+
+      await client.forward({
+        provider: 'azure',
+        apiKey: 'classic-azure-key',
+        model: 'gpt-5.5',
+        body: { input: [], reasoning: { effort: 'low' } },
+        chatBody: reasoningToolBody,
+        apiMode: 'responses',
+        stream: false,
+        authType: 'api_key',
+        customEndpoint: azureClassic(),
+      });
+
+      // apiMode 'responses' uses the native Responses build branch, not the
+      // chat→Responses reroute, so the deployment path is untouched here.
+      expect(mockFetch.mock.calls[0][0]).toContain('/openai/deployments/gpt-5.5/chat/completions');
+    });
+  });
+
   describe('Kiro subscription provider', () => {
     it('routes to the Kiro AWS JSON event-stream endpoint', async () => {
       mockFetch.mockResolvedValue(

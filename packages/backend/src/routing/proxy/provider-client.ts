@@ -1,7 +1,13 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { OPENAI_RESPONSES_ONLY_RE, stripVendorPrefix } from '../../common/constants/openai-models';
 import { XAI_RESPONSES_ONLY_RE } from '../../common/constants/xai-models';
-import { PROVIDER_ENDPOINTS, ProviderEndpoint, resolveEndpointKey } from './provider-endpoints';
+import {
+  AZURE_OPENAI_RESPONSES_KEY,
+  PROVIDER_ENDPOINTS,
+  ProviderEndpoint,
+  resolveEndpointKey,
+  toAzureOpenAiResponsesEndpoint,
+} from './provider-endpoints';
 import { validatePublicUrl } from '../../common/utils/url-validation';
 import { isSelfHosted } from '../../common/utils/detect-self-hosted';
 import { resolveSubscriptionEndpointKey } from './provider-hooks';
@@ -12,6 +18,7 @@ import {
   toAnthropicRequest,
   toResponsesRequest,
   sanitizeOpenAiBody,
+  isOpenAiReasoningModelName,
   collectChatGptSseResponse as chatGptSseCollector,
   convertChatGptResponse as chatGptResponseConverter,
   convertChatGptStreamChunk as chatGptStreamChunkConverter,
@@ -23,6 +30,7 @@ import {
   createReasoningContentStreamTransformer as reasoningContentStreamTransformer,
 } from './provider-client-converters';
 import { ForwardOptions } from './proxy-types';
+import { isObjectRecord } from './chatgpt-helpers';
 import { CodexSessionAffinity } from './codex-session-affinity';
 import { toNativeResponsesRequest } from './responses-adapter';
 import { forwardKiroChat } from './kiro-adapter';
@@ -83,6 +91,13 @@ function stripModelPrefix(model: string, endpointKey: string): string {
   return stripVendorPrefix(model);
 }
 
+/** True when a request body carries at least one function tool definition. */
+function hasFunctionTool(tools: unknown): boolean {
+  return (
+    Array.isArray(tools) && tools.some((tool) => isObjectRecord(tool) && tool.type === 'function')
+  );
+}
+
 @Injectable()
 export class ProviderClient {
   private readonly logger = new Logger(ProviderClient.name);
@@ -112,13 +127,27 @@ export class ProviderClient {
       authType,
     } = opts;
 
-    const { endpoint, endpointKey } = await this.resolveEndpoint(
+    const { endpoint: resolvedEndpoint, endpointKey } = await this.resolveEndpoint(
       customEndpoint,
       provider,
       authType,
       model,
       opts.apiMode,
     );
+    // Azure reasoning deployments (gpt-5.5 / gpt-5.3-codex) reject function tools
+    // + reasoning_effort together on /chat/completions and demand /v1/responses.
+    // Detect that exact request shape and reroute through Azure's Responses API,
+    // which the proxy then drives via the standard chat↔Responses conversion.
+    const requestSource =
+      opts.apiMode && opts.apiMode !== 'chat_completions' ? (opts.chatBody ?? body) : body;
+    const endpoint = this.shouldRerouteAzureToResponses(
+      resolvedEndpoint,
+      model,
+      opts.apiMode,
+      requestSource,
+    )
+      ? toAzureOpenAiResponsesEndpoint(resolvedEndpoint)
+      : resolvedEndpoint;
     const isGoogle = endpoint.format === 'google';
     const isAnthropic = endpoint.format === 'anthropic';
     const isResponses = opts.apiMode === 'responses' && endpoint.format === 'chatgpt';
@@ -197,6 +226,27 @@ export class ProviderClient {
     });
     if (affinity) this.codexAffinity.capture(affinity.storeKey, result.response);
     return result;
+  }
+
+  /**
+   * Decide whether a classic Azure OpenAI request must be rerouted to the
+   * Responses API. Triggers only on the exact combination Azure rejects on
+   * /chat/completions: a reasoning deployment (gpt-5.x / o-series — the only
+   * family that keeps `reasoning_effort` through to Azure) carrying both
+   * function tools and `reasoning_effort`. `/v1/responses` inbound is already
+   * Responses-shaped and uses a different build branch, so it is left alone.
+   */
+  private shouldRerouteAzureToResponses(
+    endpoint: ProviderEndpoint,
+    model: string,
+    apiMode: ForwardOptions['apiMode'],
+    body: Record<string, unknown>,
+  ): boolean {
+    if (endpoint.sanitizeKey !== 'azure-openai-classic') return false;
+    if (apiMode === 'responses') return false;
+    if (!isOpenAiReasoningModelName(model)) return false;
+    if (!('reasoning_effort' in body)) return false;
+    return hasFunctionTool(body.tools);
   }
 
   private async resolveEndpoint(
@@ -417,6 +467,10 @@ export class ProviderClient {
     }
 
     if (endpoint.format === 'chatgpt') {
+      // Override endpoints (e.g. Azure rerouted to /responses) report endpointKey
+      // 'custom'; `sanitizeKey` carries their real Responses-API identity so the
+      // per-endpoint option gating below still applies.
+      const responsesKey = endpoint.sanitizeKey ?? endpointKey;
       const requestBody =
         ctx.apiMode === 'responses'
           ? // ChatGPT subscription tokens hit the Codex Responses backend, which
@@ -432,15 +486,18 @@ export class ProviderClient {
             })
           : toResponsesRequest(requestSource, bareModel, {
               stream:
-                endpointKey === 'openai-responses' || endpointKey === 'xai-responses'
+                responsesKey === 'openai-responses' ||
+                responsesKey === 'xai-responses' ||
+                responsesKey === AZURE_OPENAI_RESPONSES_KEY
                   ? ctx.stream
                   : undefined,
               // The ChatGPT subscription backend rejects max_output_tokens with
               // unsupported_parameter; only opt in for the API-key paths.
               mapMaxOutputTokens:
-                endpointKey === 'openai-responses' ||
-                endpointKey === 'copilot-responses' ||
-                endpointKey === 'xai-responses',
+                responsesKey === 'openai-responses' ||
+                responsesKey === 'copilot-responses' ||
+                responsesKey === 'xai-responses' ||
+                responsesKey === AZURE_OPENAI_RESPONSES_KEY,
               // Only OpenAI's /responses endpoints are known to accept
               // prompt_cache_key; other Responses-shaped backends may 400.
               forwardPromptCacheKey:
