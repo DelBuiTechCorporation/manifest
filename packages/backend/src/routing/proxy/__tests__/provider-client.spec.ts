@@ -1,5 +1,5 @@
 import { ProviderClient } from '../provider-client';
-import { buildCustomEndpoint } from '../provider-endpoints';
+import { buildCustomEndpoint, buildEndpointOverride } from '../provider-endpoints';
 import type { ProviderModelRegistryService } from '../../../model-discovery/provider-model-registry.service';
 
 const mockFetch = jest.fn();
@@ -1747,6 +1747,32 @@ describe('ProviderClient', () => {
         expect.stringContaining('/openai/deployments/gpt-4/'),
         expect.anything(),
       );
+    });
+
+    it('rewrites max_tokens → max_completion_tokens for an Azure deployment built via buildEndpointOverride', async () => {
+      // Regression: customEndpoint overrides report endpointKey 'custom', which
+      // previously hid Azure from sanitizeOpenAiBody so max_tokens was never
+      // rewritten. buildEndpointOverride now stamps sanitizeKey so the proxy
+      // sanitizes against the real Azure template.
+      mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+      const classicEndpoint = buildEndpointOverride(
+        'https://myresource.openai.azure.com',
+        'azure-openai-classic',
+      );
+
+      await client.forward({
+        provider: 'azure',
+        apiKey: 'classic-azure-key',
+        model: 'gpt-5.4',
+        body: { messages: [{ role: 'user', content: 'hi' }], max_tokens: 100 },
+        stream: false,
+        authType: 'api_key',
+        customEndpoint: classicEndpoint,
+      });
+
+      const sentBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(sentBody).toHaveProperty('max_completion_tokens', 100);
+      expect(sentBody).not.toHaveProperty('max_tokens');
     });
   });
 

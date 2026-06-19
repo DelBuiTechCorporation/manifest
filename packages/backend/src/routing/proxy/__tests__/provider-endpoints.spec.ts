@@ -693,6 +693,16 @@ describe('buildEndpointOverride', () => {
     expect(ep.buildPath('model-x')).toBe('/v1/messages');
   });
 
+  it('stamps sanitizeKey with the template key so body sanitization keeps the provider identity', () => {
+    expect(
+      buildEndpointOverride('https://myresource.openai.azure.com', 'azure-openai-classic')
+        .sanitizeKey,
+    ).toBe('azure-openai-classic');
+    expect(buildEndpointOverride('https://x.services.ai.azure.com', 'azure').sanitizeKey).toBe(
+      'azure',
+    );
+  });
+
   it('throws when template key does not exist', () => {
     expect(() => buildEndpointOverride('https://example.com', 'nonexistent-template')).toThrow(
       'No provider endpoint template configured for: nonexistent-template',
@@ -800,10 +810,7 @@ describe('Azure AI Foundry endpoints', () => {
   });
 
   it('buildEndpointOverride creates Azure OpenAI classic endpoint with custom base URL', () => {
-    const ep = buildEndpointOverride(
-      'https://myresource.openai.azure.com',
-      'azure-openai-classic',
-    );
+    const ep = buildEndpointOverride('https://myresource.openai.azure.com', 'azure-openai-classic');
     expect(ep.baseUrl).toBe('https://myresource.openai.azure.com');
     const path = ep.buildPath('gpt-35-turbo');
     expect(path).toContain('/openai/deployments/gpt-35-turbo/');
