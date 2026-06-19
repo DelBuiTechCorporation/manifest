@@ -118,6 +118,12 @@ export function toResponsesRequest(
 
   if (isObjectRecord(body.reasoning)) {
     request.reasoning = body.reasoning;
+  } else if (typeof body.reasoning_effort === 'string' && body.reasoning_effort) {
+    // Chat Completions carries reasoning depth in the top-level
+    // `reasoning_effort` string; the Responses API expects `reasoning.effort`.
+    // Map it so a request routed to /responses keeps reasoning instead of
+    // silently dropping it. An explicit `reasoning` object (above) wins.
+    request.reasoning = { effort: body.reasoning_effort };
   }
 
   if (isObjectRecord(body.text)) {

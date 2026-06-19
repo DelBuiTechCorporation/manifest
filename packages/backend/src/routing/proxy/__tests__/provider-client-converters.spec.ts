@@ -1,9 +1,25 @@
 import {
   createReasoningContentStreamTransformer,
+  isOpenAiReasoningModelName,
   sanitizeOpenAiBody,
 } from '../provider-client-converters';
 
 describe('provider-client-converters', () => {
+  describe('isOpenAiReasoningModelName', () => {
+    it('matches gpt-5 / o-series, bare and vendor-prefixed', () => {
+      expect(isOpenAiReasoningModelName('gpt-5.5')).toBe(true);
+      expect(isOpenAiReasoningModelName('o3-mini')).toBe(true);
+      // vendor-prefixed: the prefix is stripped before matching.
+      expect(isOpenAiReasoningModelName('openai/gpt-5.3-codex')).toBe(true);
+    });
+
+    it('does not match non-reasoning families', () => {
+      expect(isOpenAiReasoningModelName('gpt-4o')).toBe(false);
+      expect(isOpenAiReasoningModelName('grok-4.3')).toBe(false);
+      expect(isOpenAiReasoningModelName('anthropic/claude-sonnet-4')).toBe(false);
+    });
+  });
+
   describe('sanitizeOpenAiBody', () => {
     /* ── Top-level field stripping ── */
 

@@ -147,6 +147,11 @@ const azureFoundryPath = () => `/models/chat/completions?api-version=${AZURE_FOU
 const AZURE_OPENAI_API_VERSION = '2025-04-01-preview';
 const azureOpenAIPath = (model: string) =>
   `/openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=${AZURE_OPENAI_API_VERSION}`;
+// Classic Azure OpenAI Responses API. Unlike chat/completions, the deployment
+// name travels in the request body (`model`), not the path. Used to reroute
+// reasoning deployments (gpt-5.x / o-series) that reject function tools +
+// reasoning_effort together on the chat/completions path. Verified live.
+const azureOpenAIResponsesPath = () => `/openai/responses?api-version=${AZURE_OPENAI_API_VERSION}`;
 export const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
   azure: {
     // Placeholder — always overridden in resolveForwardEndpoint via region URL.
@@ -514,6 +519,28 @@ export function buildCustomEndpoint(
     format: 'openai',
     ...openaiStreamUsage,
     requiresSsrfRevalidation: true,
+  };
+}
+
+/** Identity marker for a classic Azure OpenAI endpoint rerouted to /responses. */
+export const AZURE_OPENAI_RESPONSES_KEY = 'azure-openai-classic-responses';
+
+/**
+ * Reroute a resolved classic Azure OpenAI endpoint (chat/completions) to its
+ * Responses API sibling. gpt-5.5 / gpt-5.3-codex reject function tools +
+ * `reasoning_effort` together on `/openai/deployments/{m}/chat/completions`
+ * (400 "Function tools with reasoning_effort are not supported … Please use
+ * /v1/responses instead") but accept the same request on `/openai/responses`.
+ * Keeps the user's base URL + `api-key` headers, switches the path and flips the
+ * body format to `chatgpt` so the proxy runs the chat↔Responses conversion.
+ * Verified against a live Azure OpenAI resource (gpt-5.5 / gpt-5.3-codex).
+ */
+export function toAzureOpenAiResponsesEndpoint(endpoint: ProviderEndpoint): ProviderEndpoint {
+  return {
+    ...endpoint,
+    buildPath: azureOpenAIResponsesPath,
+    format: 'chatgpt',
+    sanitizeKey: AZURE_OPENAI_RESPONSES_KEY,
   };
 }
 
