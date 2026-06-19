@@ -1,5 +1,6 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Tier, TIERS } from '../../scoring/types';
+import { RoutingCacheService } from '../routing-core/routing-cache.service';
 import type { ModelRoute } from 'manifest-shared';
 
 interface LockEntry {
@@ -46,11 +47,18 @@ export class SessionModelLockService implements OnModuleDestroy {
     reasoning: 3,
   };
 
-  constructor() {
+  constructor(private readonly routingCache: RoutingCacheService) {
     this.cleanupTimer = setInterval(() => this.evictStale(), CLEANUP_INTERVAL_MS);
     if (typeof this.cleanupTimer === 'object' && 'unref' in this.cleanupTimer) {
       this.cleanupTimer.unref();
     }
+    // Drop an agent's session locks whenever its routing config changes (tier
+    // override, specificity, provider connect/disconnect, …). Without this a
+    // model swap in the dashboard wouldn't take effect until the lock's TTL
+    // expired, because the proxy keeps reusing the previously-locked route for
+    // the session. Every routing mutation already funnels through
+    // RoutingCacheService.invalidateAgent, so this is the one place to hook.
+    this.routingCache.addInvalidationListener((agentId) => this.clearAgent(agentId));
   }
 
   onModuleDestroy() {
@@ -114,6 +122,17 @@ export class SessionModelLockService implements OnModuleDestroy {
   /** @internal Used for testing only. */
   clearSession(sessionKey: string): void {
     this.locks.delete(sessionKey);
+  }
+
+  /**
+   * Drop every session lock held for an agent. Called when the agent's routing
+   * config changes so the next request re-resolves against the new config and
+   * re-locks, instead of staying pinned to the route locked before the change.
+   */
+  clearAgent(agentId: string): void {
+    for (const [key, entry] of this.locks) {
+      if (entry.agentId === agentId) this.locks.delete(key);
+    }
   }
 
   private evictStale(): void {
