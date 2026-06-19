@@ -477,6 +477,8 @@ const FallbackList: Component<FallbackListProps> = (props) => {
                             usedKeyLabelsForModelInTier(
                               (props.tierData ?? (() => undefined))(),
                               model(),
+                              keys()[0]?.provider,
+                              keys()[0]?.auth_type,
                               i(),
                               keys()[0]?.label,
                             )
