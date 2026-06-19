@@ -733,7 +733,14 @@ const PrimaryKeyChip: Component<PrimaryKeyChipProps> = (props) => {
   };
 
   const usedByFallbacks = () =>
-    usedKeyLabelsForModelInTier(props.tier(), props.modelName(), 'primary', keys()[0]?.label);
+    usedKeyLabelsForModelInTier(
+      props.tier(),
+      props.modelName(),
+      keys()[0]?.provider,
+      keys()[0]?.auth_type,
+      'primary',
+      keys()[0]?.label,
+    );
 
   return (
     <Show when={keys().length > 1}>

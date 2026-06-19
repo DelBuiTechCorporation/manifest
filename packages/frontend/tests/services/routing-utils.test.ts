@@ -269,9 +269,9 @@ describe("usedKeyLabelsForModelInTier", () => {
     const tier = baseTier({
       override_route: { provider: "openai", authType: "api_key", model: "gpt-4o" },
     });
-    expect(usedKeyLabelsForModelInTier(tier, "gpt-4o", undefined, "Default")).toEqual(
-      new Set(["default"]),
-    );
+    expect(
+      usedKeyLabelsForModelInTier(tier, "gpt-4o", undefined, undefined, undefined, "Default"),
+    ).toEqual(new Set(["default"]));
   });
 
   it("does not include the primary slot when excludeSlot is 'primary'", () => {
@@ -283,7 +283,9 @@ describe("usedKeyLabelsForModelInTier", () => {
         keyLabel: "Work",
       },
     });
-    expect(usedKeyLabelsForModelInTier(tier, "gpt-4o", "primary")).toEqual(new Set());
+    expect(usedKeyLabelsForModelInTier(tier, "gpt-4o", undefined, undefined, "primary")).toEqual(
+      new Set(),
+    );
   });
 
   it("ignores the primary when its model does not match", () => {
@@ -317,9 +319,9 @@ describe("usedKeyLabelsForModelInTier", () => {
         { provider: "openai", authType: "api_key", model: "gpt-4o", keyLabel: "Work" },
       ],
     });
-    expect(usedKeyLabelsForModelInTier(tier, "gpt-4o", undefined, "Default")).toEqual(
-      new Set(["default", "work"]),
-    );
+    expect(
+      usedKeyLabelsForModelInTier(tier, "gpt-4o", undefined, undefined, undefined, "Default"),
+    ).toEqual(new Set(["default", "work"]));
   });
 
   it("excludes a specific fallback index from collection", () => {
@@ -329,7 +331,9 @@ describe("usedKeyLabelsForModelInTier", () => {
         { provider: "openai", authType: "api_key", model: "gpt-4o", keyLabel: "Personal" },
       ],
     });
-    expect(usedKeyLabelsForModelInTier(tier, "gpt-4o", 0)).toEqual(new Set(["personal"]));
+    expect(usedKeyLabelsForModelInTier(tier, "gpt-4o", undefined, undefined, 0)).toEqual(
+      new Set(["personal"]),
+    );
   });
 
   it("combines primary and fallback labels when both match", () => {
@@ -345,6 +349,28 @@ describe("usedKeyLabelsForModelInTier", () => {
       ],
     });
     expect(usedKeyLabelsForModelInTier(tier, "gpt-4o")).toEqual(new Set(["work", "personal"]));
+  });
+
+  it("does not count a same-named model from a different provider/auth (cross-provider isolation)", () => {
+    // Primary is gpt-5.5 on Azure (api_key); the chip belongs to gpt-5.5 on an
+    // OpenAI subscription. The Azure route must NOT consume the OpenAI key
+    // "DBTC", or it gets greyed out in the OpenAI key picker.
+    const tier = baseTier({
+      override_route: { provider: "azure", authType: "api_key", model: "gpt-5.5" },
+      fallback_routes: [
+        { provider: "openai", authType: "subscription", model: "gpt-5.5", keyLabel: "Agaron" },
+      ],
+    });
+    // Target = OpenAI subscription gpt-5.5, default key "DBTC", excluding its own
+    // fallback slot 0. Only the OpenAI subscription routes count → DBTC stays free.
+    expect(
+      usedKeyLabelsForModelInTier(tier, "gpt-5.5", "openai", "subscription", 0, "DBTC"),
+    ).toEqual(new Set());
+    // Without provider/auth scoping (legacy), the Azure primary would wrongly
+    // pull in the default key — proving the scoping is what fixes it.
+    expect(usedKeyLabelsForModelInTier(tier, "gpt-5.5", undefined, undefined, 0, "DBTC")).toEqual(
+      new Set(["dbtc"]),
+    );
   });
 });
 

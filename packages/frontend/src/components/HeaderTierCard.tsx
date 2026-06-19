@@ -442,6 +442,8 @@ const HeaderTierCard: Component<Props> = (props) => {
                         usedKeyLabelsForModelInTier(
                           props.tier,
                           modelName(),
+                          primaryKeys()[0]?.provider,
+                          primaryKeys()[0]?.auth_type,
                           'primary',
                           primaryKeys()[0]?.label,
                         )

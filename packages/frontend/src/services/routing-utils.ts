@@ -15,12 +15,20 @@ export interface RouteSlots {
  * Reads through the structured `override_route` and `fallback_routes` fields;
  * `route.keyLabel` is the canonical pin location.
  *
+ * Matching is scoped to the same `(provider, authType, model)` — key labels
+ * only exist within one provider+auth (e.g. the "DBTC"/"Agaron" OpenAI
+ * subscriptions), so a same-named model from a *different* provider (e.g. an
+ * Azure `gpt-5.5`) must NOT consume those keys. When `providerId`/`authType`
+ * are omitted the match falls back to model-only (legacy callers).
+ *
  * @param excludeSlot - 'primary' to skip the primary slot (for the primary's
  *   own dropdown), or a fallback index to skip that fallback (for its dropdown).
  */
 export function usedKeyLabelsForModelInTier(
   tier: RouteSlots | undefined,
   modelName: string,
+  providerId?: string,
+  authType?: AuthType,
   excludeSlot?: 'primary' | number,
   /** When a route has no explicit key pin, the proxy uses the first key
    *  by priority. Pass that label here so it gets counted as "used". */
@@ -28,10 +36,14 @@ export function usedKeyLabelsForModelInTier(
 ): Set<string> {
   const used = new Set<string>();
   if (!tier) return used;
+  const routeMatchesTarget = (route: ModelRoute): boolean =>
+    route.model === modelName &&
+    (providerId === undefined || route.provider.toLowerCase() === providerId.toLowerCase()) &&
+    (authType === undefined || route.authType === authType);
   // Check primary
   if (excludeSlot !== 'primary') {
     const primary = tier.override_route ?? null;
-    if (primary && primary.model === modelName) {
+    if (primary && routeMatchesTarget(primary)) {
       const label = primary.keyLabel ?? defaultKeyLabel;
       if (label) used.add(label.toLowerCase());
     }
@@ -42,7 +54,7 @@ export function usedKeyLabelsForModelInTier(
     if (excludeSlot === i) continue;
     const r = routes[i];
     if (!r) continue;
-    if (r.model === modelName) {
+    if (routeMatchesTarget(r)) {
       const label = r.keyLabel ?? defaultKeyLabel;
       if (label) used.add(label.toLowerCase());
     }
@@ -87,7 +99,14 @@ export function availableRouteKeysForModel(
 ): RoutingProvider[] {
   const keys = activeRouteKeys(providers, providerId, authType);
   if (keys.length === 0) return keys;
-  const used = usedKeyLabelsForModelInTier(tier, modelName, excludeSlot, keys[0]?.label);
+  const used = usedKeyLabelsForModelInTier(
+    tier,
+    modelName,
+    providerId,
+    authType,
+    excludeSlot,
+    keys[0]?.label,
+  );
   return keys.filter((key) => !used.has(key.label.toLowerCase()));
 }
 
