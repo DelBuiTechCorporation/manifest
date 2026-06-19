@@ -1,4 +1,5 @@
 import { SessionModelLockService } from '../session-model-lock.service';
+import { RoutingCacheService } from '../../routing-core/routing-cache.service';
 import type { ModelRoute } from 'manifest-shared';
 
 function makeRoute(model: string, provider = 'anthropic'): ModelRoute {
@@ -7,10 +8,12 @@ function makeRoute(model: string, provider = 'anthropic'): ModelRoute {
 
 describe('SessionModelLockService', () => {
   let svc: SessionModelLockService;
+  let routingCache: RoutingCacheService;
 
   beforeEach(() => {
     jest.useFakeTimers();
-    svc = new SessionModelLockService();
+    routingCache = new RoutingCacheService();
+    svc = new SessionModelLockService(routingCache);
   });
 
   afterEach(() => {
@@ -134,6 +137,32 @@ describe('SessionModelLockService', () => {
       // Entry is evicted — tryLock should now succeed.
       svc.tryLock('sess-old', 'agent-1', 'standard', makeRoute('gpt-4o'));
       expect(svc.getLockedRoute('sess-old', 'agent-1', 'standard')?.route.model).toBe('gpt-4o');
+    });
+  });
+
+  describe('clearAgent', () => {
+    it('drops every lock held for the agent but leaves other agents alone', () => {
+      svc.tryLock('sess-1', 'agent-1', 'complex', makeRoute('claude-sonnet-4.5'));
+      svc.tryLock('sess-2', 'agent-1', 'standard', makeRoute('gpt-4o'));
+      svc.tryLock('sess-3', 'agent-2', 'standard', makeRoute('gpt-4o'));
+
+      svc.clearAgent('agent-1');
+
+      expect(svc.getLockedRoute('sess-1', 'agent-1', 'complex')).toBeNull();
+      expect(svc.getLockedRoute('sess-2', 'agent-1', 'standard')).toBeNull();
+      // A different agent's lock is untouched.
+      expect(svc.getLockedRoute('sess-3', 'agent-2', 'standard')).not.toBeNull();
+    });
+
+    it('is invoked when the agent routing cache is invalidated, so a config change frees the lock', () => {
+      svc.tryLock('sess-1', 'agent-1', 'standard', makeRoute('gpt-4o'));
+      expect(svc.getLockedRoute('sess-1', 'agent-1', 'standard')).not.toBeNull();
+
+      // Simulate a routing-config change (tier swap, provider toggle, …).
+      routingCache.invalidateAgent('agent-1');
+
+      // The previously locked route is gone — next request resolves fresh.
+      expect(svc.getLockedRoute('sess-1', 'agent-1', 'standard')).toBeNull();
     });
   });
 });
