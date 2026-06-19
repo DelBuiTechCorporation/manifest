@@ -1847,6 +1847,34 @@ describe('ProviderClient', () => {
       expect(result.isChatGpt).toBe(true);
     });
 
+    it('reroutes a Codex deployment even with no tools and no reasoning_effort (responses-only family)', async () => {
+      // gpt-5.3-codex rejects /chat/completions outright ("operation
+      // unsupported") — every request must use /responses, not just the
+      // tools+reasoning combination. Verified against a live Azure resource.
+      mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+
+      const result = await client.forward({
+        provider: 'azure',
+        apiKey: 'classic-azure-key',
+        model: 'gpt-5.3-codex',
+        body: { messages: [{ role: 'user', content: 'ping' }], max_tokens: 64 },
+        stream: false,
+        authType: 'api_key',
+        customEndpoint: azureClassic(),
+      });
+
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe(
+        'https://myresource.openai.azure.com/openai/responses?api-version=2025-04-01-preview',
+      );
+      const sentBody = JSON.parse(init.body);
+      expect(sentBody.model).toBe('gpt-5.3-codex');
+      expect(sentBody.max_output_tokens).toBe(64);
+      expect(sentBody).not.toHaveProperty('tools');
+      expect(sentBody).not.toHaveProperty('reasoning');
+      expect(result.isChatGpt).toBe(true);
+    });
+
     it('keeps streaming on the Responses path when the caller streams', async () => {
       mockFetch.mockResolvedValue(new Response('{}', { status: 200 }));
 

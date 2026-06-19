@@ -230,11 +230,19 @@ export class ProviderClient {
 
   /**
    * Decide whether a classic Azure OpenAI request must be rerouted to the
-   * Responses API. Triggers only on the exact combination Azure rejects on
-   * /chat/completions: a reasoning deployment (gpt-5.x / o-series — the only
-   * family that keeps `reasoning_effort` through to Azure) carrying both
-   * function tools and `reasoning_effort`. `/v1/responses` inbound is already
-   * Responses-shaped and uses a different build branch, so it is left alone.
+   * Responses API. `/v1/responses` inbound is already Responses-shaped and uses a
+   * different build branch, so it is left alone. Two families need the reroute:
+   *
+   * 1. Responses-only models (Codex, `-pro`, o1-pro, deep-research) reject
+   *    `/chat/completions` outright ("The requested operation is unsupported"),
+   *    so every request reroutes — exactly as the native OpenAI path does via
+   *    `OPENAI_RESPONSES_ONLY_RE`.
+   * 2. Other gpt-5 / o-series deployments only reject the specific combination of
+   *    function tools + `reasoning_effort` (e.g. gpt-5.5); plain requests stay on
+   *    `/chat/completions`. They are also the only family that keeps
+   *    `reasoning_effort` through to Azure, so the check is safe for grok/etc.
+   *
+   * Both behaviours were verified against a live Azure OpenAI resource.
    */
   private shouldRerouteAzureToResponses(
     endpoint: ProviderEndpoint,
@@ -244,6 +252,7 @@ export class ProviderClient {
   ): boolean {
     if (endpoint.sanitizeKey !== 'azure-openai-classic') return false;
     if (apiMode === 'responses') return false;
+    if (OPENAI_RESPONSES_ONLY_RE.test(stripVendorPrefix(model))) return true;
     if (!isOpenAiReasoningModelName(model)) return false;
     if (!('reasoning_effort' in body)) return false;
     return hasFunctionTool(body.tools);
