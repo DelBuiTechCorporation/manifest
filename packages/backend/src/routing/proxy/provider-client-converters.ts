@@ -364,13 +364,23 @@ export function sanitizeOpenAiBody(
 
   // Strip vendor prefix (e.g., "openai/gpt-5" → "gpt-5") before matching.
   const bareForRegex = model.includes('/') ? model.substring(model.indexOf('/') + 1) : model;
-  const needsMaxCompletionTokens = usesOpenAiMaxCompletionTokens(endpointKey, bareForRegex);
+  const isAzure = AZURE_ENDPOINTS.has(endpointKey);
+  // Reasoning model identifiable by its (deployment) name — gpt-5 / o-series.
+  const isOpenAiReasoningModel = usesOpenAiMaxCompletionTokens(endpointKey, bareForRegex);
+  // Every Azure deployment accepts `max_completion_tokens`, and OpenAI reasoning
+  // deployments *require* it. Azure deployment names are user-defined, so a name
+  // regex is unreliable — rewrite unconditionally for Azure. Native OpenAI /
+  // Copilot keep the regex (legacy `max_tokens` still works for their non-
+  // reasoning models). Verified against a live Azure resource.
+  const needsMaxCompletionTokens = isAzure || isOpenAiReasoningModel;
   const convertMaxTokens =
     needsMaxCompletionTokens && 'max_tokens' in body && !('max_completion_tokens' in body);
   // Azure is OpenAI infrastructure and accepts `reasoning_effort` on its
   // reasoning models — keep it so they actually reason, instead of stripping it
   // as a generic "OpenAI-only" extra field (Azure isn't a passthrough provider).
-  const keepReasoningEffort = needsMaxCompletionTokens && AZURE_ENDPOINTS.has(endpointKey);
+  // Gated on the name regex: only genuine reasoning deployments, so a `gpt-4o` /
+  // grok / deepseek deployment doesn't get an unsupported field forwarded.
+  const keepReasoningEffort = isOpenAiReasoningModel && isAzure;
   // Once reasoning is engaged (`reasoning_effort` reaches the model), OpenAI-infra
   // reasoning models (gpt-5 / o-series) reject sampling knobs: top_p /
   // frequency_penalty / presence_penalty aren't supported at all, and temperature
@@ -381,7 +391,7 @@ export function sanitizeOpenAiBody(
   // The Azure behaviour was verified against a live resource.
   const reasoningEngaged =
     'reasoning_effort' in body &&
-    needsMaxCompletionTokens &&
+    isOpenAiReasoningModel &&
     (endpointKey === 'openai' || keepReasoningEffort);
 
   const cleaned: Record<string, unknown> = {};

@@ -461,9 +461,12 @@ export class ProviderClient {
     }
 
     // OpenAI-compatible path (default)
+    // Override endpoints (Azure, Bedrock, Qwen, …) report endpointKey 'custom';
+    // `sanitizeKey` carries their real template identity so body sanitization
+    // (e.g. Azure's max_tokens → max_completion_tokens) keys off the right one.
     const sanitized = sanitizeOpenAiBody(
       requestSource,
-      endpointKey,
+      endpoint.sanitizeKey ?? endpointKey,
       ctx.model,
       ctx.reasoningContentLookup,
     );

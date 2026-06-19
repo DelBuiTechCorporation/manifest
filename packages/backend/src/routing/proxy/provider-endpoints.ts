@@ -55,6 +55,16 @@ export interface ProviderEndpoint {
    * endpoints that only reuse the Anthropic protocol shape.
    */
   skipSubscriptionIdentity?: boolean;
+  /**
+   * Logical endpoint key to use for OpenAI body sanitization when this object
+   * is an override of a known provider template (see `buildEndpointOverride`).
+   * `resolveEndpoint` reports `endpointKey: 'custom'` for every override, which
+   * loses the provider identity that `sanitizeOpenAiBody` keys off (e.g. Azure
+   * needs `max_tokens` → `max_completion_tokens`). Carrying the template key here
+   * lets the proxy sanitize against the real provider without changing the
+   * generic `'custom'` endpointKey used elsewhere.
+   */
+  sanitizeKey?: string;
 }
 
 const openaiStreamUsage = { streamUsageReporting: 'openai_stream_options' as const };
@@ -515,6 +525,9 @@ export function buildEndpointOverride(baseUrl: string, templateKey: string): Pro
   return {
     ...template,
     baseUrl: normalizeProviderBaseUrl(baseUrl),
+    // Preserve the template identity for body sanitization — `resolveEndpoint`
+    // otherwise reports this override as the generic `'custom'` endpointKey.
+    sanitizeKey: templateKey,
     // The base URL came from a user-supplied source (Qwen region selector,
     // MiniMax OAuth resource URL). Treat it as an SSRF candidate and
     // re-validate before each forward.

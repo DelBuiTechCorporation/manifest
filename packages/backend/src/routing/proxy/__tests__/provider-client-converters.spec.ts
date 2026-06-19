@@ -960,13 +960,26 @@ describe('provider-client-converters', () => {
       expect(result).not.toHaveProperty('max_tokens');
     });
 
-    it('does NOT convert max_tokens for non-reasoning Azure deployments (grok/deepseek/kimi)', () => {
-      const body = { messages: [], max_tokens: 4096 };
+    it('rewrites max_tokens for ANY Azure deployment, even non-reasoning / oddly-named ones', () => {
+      // Azure deployment names are user-defined, so we can't tell from the name
+      // alone whether it's an OpenAI reasoning model. All Azure deployments accept
+      // max_completion_tokens, so rewrite unconditionally to avoid a 400 on an
+      // OpenAI model deployed under a non-standard name.
+      const grok = sanitizeOpenAiBody(
+        { messages: [], max_tokens: 4096 },
+        'azure-openai-classic',
+        'grok-4.3',
+      );
+      expect(grok).toHaveProperty('max_completion_tokens', 4096);
+      expect(grok).not.toHaveProperty('max_tokens');
 
-      const result = sanitizeOpenAiBody(body, 'azure-openai-classic', 'grok-4.3');
-
-      expect(result).toHaveProperty('max_tokens', 4096);
-      expect(result).not.toHaveProperty('max_completion_tokens');
+      const oddName = sanitizeOpenAiBody(
+        { messages: [], max_tokens: 4096 },
+        'azure',
+        'my-reasoner',
+      );
+      expect(oddName).toHaveProperty('max_completion_tokens', 4096);
+      expect(oddName).not.toHaveProperty('max_tokens');
     });
 
     it('preserves reasoning_effort for Azure reasoning models', () => {
@@ -1017,13 +1030,14 @@ describe('provider-client-converters', () => {
       expect(result).toHaveProperty('max_completion_tokens', 256);
     });
 
-    it('strips reasoning_effort for non-reasoning Azure deployments', () => {
+    it('strips reasoning_effort for non-reasoning Azure deployments (and still rewrites max_tokens)', () => {
       const body = { messages: [], max_tokens: 256, reasoning_effort: 'low' };
 
       const result = sanitizeOpenAiBody(body, 'azure-openai-classic', 'grok-4.3');
 
       expect(result).not.toHaveProperty('reasoning_effort');
-      expect(result).toHaveProperty('max_tokens', 256);
+      expect(result).toHaveProperty('max_completion_tokens', 256);
+      expect(result).not.toHaveProperty('max_tokens');
     });
 
     it('still strips other OpenAI-only fields for Azure GPT-5 while keeping reasoning_effort', () => {
