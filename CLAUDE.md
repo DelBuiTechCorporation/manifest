@@ -216,27 +216,36 @@ Every resource belongs to a tenant. Guards resolve the tenant once per request a
 | GET | `/api/v1/overview` | Session/API Key | Dashboard summary |
 | GET | `/api/v1/tokens` | Session/API Key | Token usage analytics |
 | GET | `/api/v1/costs` | Session/API Key | Cost analytics |
-| GET | `/api/v1/messages` | Session/API Key | Paginated message log |
 | GET | `/api/v1/agents` | Session/API Key | Agent list with sparklines |
 | POST | `/api/v1/agents` | Session/API Key | Create agent + API key |
-| DELETE | `/api/v1/agents/:name` | Session/API Key | Delete agent |
-| GET | `/api/v1/agents/:name/key` | Session/API Key | Get agent API key |
-| POST | `/api/v1/agents/:name/rotate-key` | Session/API Key | Rotate API key |
-| PATCH | `/api/v1/agents/:name` | Session/API Key | Rename agent |
+| GET | `/api/v1/agents/:agentName` | Session/API Key | Single agent detail |
+| GET/POST | `/api/v1/agents/:agentName/duplicate*` | Session/API Key | Duplicate agent (preview + confirm) |
+| DELETE | `/api/v1/agents/:agentName` | Session/API Key | Delete agent |
+| GET | `/api/v1/agents/:agentName/key` | Session/API Key | Get agent API key |
+| POST | `/api/v1/agents/:agentName/rotate-key` | Session/API Key | Rotate API key |
+| PATCH | `/api/v1/agents/:agentName` | Session/API Key | Rename agent |
+| GET | `/api/v1/messages` | Session/API Key | Paginated message log |
+| GET/PATCH/DELETE | `/api/v1/messages/:id/*` | Session/API Key | Message details, feedback, miscategorized flag |
 | GET | `/api/v1/security` | Session/API Key | Security score + events |
 | GET | `/api/v1/model-prices` | Session/API Key | Model pricing list |
+| GET | `/api/v1/free-models` | Session/API Key | Free LLM model catalog |
+| GET | `/api/v1/savings/*` | Session/API Key | Savings analytics (summary, timeseries, baseline candidates) |
 | GET | `/api/v1/agent/:agentName/usage` | Session/API Key | Per-agent token usage |
 | GET | `/api/v1/agent/:agentName/costs` | Session/API Key | Per-agent cost data |
-| GET/POST/PATCH/DELETE | `/api/v1/notifications` | Session/API Key | Notification rules CRUD |
-| GET/POST/DELETE | `/api/v1/notifications/email-provider` | Session/API Key | Email provider config |
-| GET/POST/PUT/DELETE | `/api/v1/routing/*` | Session/API Key | Routing config (tiers + providers) |
-| GET/PUT/POST/DELETE | `/api/v1/routing/:agent/specificity/*` | Session/API Key | Specificity routing config |
-| POST | `/api/v1/routing/subscription-providers` | Session/API Key | Subscription provider config |
-| POST | `/api/v1/routing/:agentName/ollama/sync` | Session/API Key | Sync Ollama models |
+| GET/POST/PATCH/DELETE | `/api/v1/notifications/*` | Session/API Key | Notification rules CRUD + email provider config |
+| GET/POST/PUT/PATCH/DELETE | `/api/v1/routing/:agentName/*` | Session/API Key | Routing config (tiers, providers, model-params, header-tiers, custom-providers, specificity, etc.) |
+| POST | `/api/v1/routing/ollama/sync` | Session/API Key | Sync Ollama models |
+| GET/POST/DELETE | `/api/v1/oauth/:provider/*` | Session/API Key | OAuth flows (Gemini, OpenAI, Kiro, MiniMax) |
 | POST | `/api/v1/routing/resolve` | Bearer (mnfst_*) | Model resolution |
+| POST | `/api/v1/routing/subscription-providers` | Bearer (mnfst_*) | Subscription provider config |
+| GET | `/api/v1/setup/status` | Public | First-run setup status |
+| POST | `/api/v1/setup/admin` | Public | Create initial admin user |
+| GET | `/api/v1/public/*` | Public (opt-in) | Aggregate public stats (controlled by `MANIFEST_PUBLIC_STATS`) |
+| GET | `/v1/models` | Bearer (mnfst_*) | Available model list (proxy) |
 | POST | `/v1/chat/completions` | Bearer (mnfst_*) | LLM proxy (OpenAI-compatible) |
 | POST | `/v1/responses` | Bearer (mnfst_*) | LLM proxy (OpenAI Responses API) |
 | POST | `/v1/messages` | Bearer (mnfst_*) | LLM proxy (Anthropic Messages API) |
+| GET/POST/PATCH | `/api/v1/playground/*` | Session/API Key | Playground runs (run, list, star, mark best) |
 | GET | `/api/v1/events` | Session | SSE real-time events |
 | GET | `/api/v1/github/stars` | Public | GitHub star count |
 
@@ -246,6 +255,7 @@ See `packages/backend/.env.example` for all variables. Key ones:
 
 - `BETTER_AUTH_SECRET` — **Required.** Secret for Better Auth session signing (min 32 chars). Generate with `openssl rand -hex 32`.
 - `DATABASE_URL` — **Required in production.** PostgreSQL connection string. Defaults to `postgresql://myuser:mypassword@localhost:5432/mydatabase`.
+- `MANIFEST_ENCRYPTION_KEY` — Recommended. AES-256-GCM key (min 32 chars) for encrypting stored provider API keys and OAuth tokens. Defaults to `BETTER_AUTH_SECRET` if unset — set this independently so a session-cookie leak doesn't also expose provider credentials.
 - `PORT` — Server port. Default: `3001`
 - `BIND_ADDRESS` — Bind address. Default: `127.0.0.1` (use `0.0.0.0` for Railway/Docker)
 - `NODE_ENV` — `development` or `production`. CORS only enabled in dev.
@@ -255,14 +265,21 @@ See `packages/backend/.env.example` for all variables. Key ones:
 - `API_KEY` — Secret for programmatic API access (X-API-Key header).
 - `THROTTLE_TTL` — Rate limit window in ms. Default: `60000`
 - `THROTTLE_LIMIT` — Max requests per window. Default: `100`
-- `MAILGUN_API_KEY` — Mailgun API key for email verification/password reset.
-- `MAILGUN_DOMAIN` — Mailgun sending domain (e.g. `mg.manifest.build`).
-- `NOTIFICATION_FROM_EMAIL` — Sender email. Default: `noreply@manifest.build`
+- `DB_POOL_MAX` — PostgreSQL connection pool size. Default: `20`
+- `PROVIDER_TIMEOUT_MS` — Per-attempt timeout (ms) for upstream provider requests. Default: `180000`
+- `STREAM_WARMUP_MS` — Timeout (ms) to wait for the first chunk of a streaming response before trying a fallback. Default: `15000`
+- `EMAIL_PROVIDER` — Unified email provider: `resend` (recommended), `mailgun`, or `sendgrid`. Used for Better Auth transactional emails and threshold alerts.
+- `EMAIL_API_KEY` — API key for the configured `EMAIL_PROVIDER`.
+- `EMAIL_DOMAIN` — Sending domain (required for Mailgun).
+- `EMAIL_FROM` — Sender address. Default: `noreply@manifest.build`
+- `MAILGUN_API_KEY` / `MAILGUN_DOMAIN` / `NOTIFICATION_FROM_EMAIL` — Legacy Mailgun-only variables. Deprecated; use `EMAIL_*` instead. Still honored for backward compatibility.
 - `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` — Google OAuth (optional)
 - `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` — GitHub OAuth (optional)
 - `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` — Discord OAuth (optional)
 - `SEED_DATA` — Set `true` to seed demo data on startup.
-- `MANIFEST_MODE` — `selfhosted` or `cloud` (default: `cloud`; auto-`selfhosted` inside Docker via `/.dockerenv`). Self-hosted mode enables loopback auth shortcuts and allows custom-provider URLs with `http://` / private IPs. `local` is accepted as a legacy alias for `selfhosted`.
+- `MANIFEST_MODE` — `selfhosted` or `cloud` (default: `cloud`; auto-detected as `selfhosted` inside Docker via `/.dockerenv` or Podman via `/run/.containerenv`). Self-hosted mode enables loopback auth shortcuts and allows custom-provider URLs with `http://` / private IPs. `local` is accepted as a legacy alias for `selfhosted`.
+- `MANIFEST_TELEMETRY_DISABLED` — Set `1` to opt out of anonymous telemetry (self-hosted only).
+- `MANIFEST_PUBLIC_STATS` — Set `true` to expose `/api/v1/public/*` aggregate stats without auth (cloud-only marketing use).
 - `OLLAMA_HOST` — Ollama endpoint. Defaults to `http://localhost:11434` outside Docker and `http://host.docker.internal:11434` inside the bundled `docker/docker-compose.yml`.
 
 ## Domain Terminology
@@ -284,6 +301,7 @@ Any backend endpoint that returns rows rendered by the frontend `MessageTable` /
 Helmet enforces a strict CSP in `main.ts`. The policy only allows `'self'` origins — **no external CDNs are permitted**.
 
 **Rule: Never load external resources from CDNs.** All assets (fonts, icons, stylesheets) must be self-hosted under `packages/frontend/public/`. This keeps the CSP strict and avoids third-party dependencies at runtime.
+- **DM Sans**, **Bricolage Grotesque**, **JetBrains Mono** — individual `.woff2` files in `public/fonts/`
 
 To add a new font or icon library:
 1. Download the CSS and font files into `packages/frontend/public/`
@@ -313,9 +331,40 @@ Self-hosted installs send one aggregate usage report per 24h to `TELEMETRY_ENDPO
 - **Agent key auth caching**: `AgentKeyAuthGuard` caches valid API keys in-memory for 5 minutes.
 - **Database migrations**: `synchronize` is permanently `false`. Migrations auto-run on boot (`migrationsRun: true`) wrapped in a single transaction. Better Auth manages its own tables separately via `ctx.runMigrations()`.
 - **LLM Routing**: Two-layer routing system with provider key management (AES-256-GCM encrypted) and OpenAI-compatible proxy at `/v1/chat/completions`:
-  - **Complexity tiers** (always active): 4 tiers (simple/standard/complex/reasoning) based on request content scoring with 23 weighted keyword dimensions.
-  - **Specificity routing** (opt-in): 9 task-type categories (coding, web_browsing, data_analysis, image_generation, video_generation, social_media, email_management, calendar_management, trading). When enabled, overrides complexity tiers.
+  - **Complexity tiers** (_being retired_ — see [Routing deprecation](#routing-deprecation-legacy-vs-clean-cohorts)): 4 tiers (simple/standard/complex/reasoning) based on request content scoring with 31 weighted keyword dimensions. Per-agent, gated by `complexity_routing_enabled`; agents with it off route everything to the `default` tier.
+  - **Specificity routing** (opt-in; _being retired_): 9 task-type categories (coding, web_browsing, data_analysis, image_generation, video_generation, social_media, email_management, calendar_management, trading). When enabled, overrides complexity tiers.
   - **Resolution order**: specificity check → complexity scoring → tier assignment → provider/model resolution → proxy forward.
+  - **Kept long-term**: **default routing** (one model + up to 5 fallbacks) and **custom routing** (header-triggered tiers).
+
+### Routing deprecation: legacy vs clean cohorts
+
+Complexity routing (simple/standard/complex/reasoning) and task-specific / specificity routing (the 9 categories) are **being retired**. We are keeping **default routing** and **custom (header) routing**. In this phase the routing _engine_ is unchanged — nothing is migrated or deleted — but the dashboard **hides the retiring surfaces from agents that never used them**.
+
+**The gate is per-agent and keyed off config-presence, _not_ per-user signup date.** An agent is **legacy** (still sees the deprecated surfaces) if _any_ of these is true:
+
+- complexity routing is enabled for it (`complexity_routing_enabled`), **or**
+- a non-`default` tier has an `override_route`, **or**
+- a specificity category is active or has an override.
+
+Otherwise the agent is **clean** and gets the simplified view. The signals live in `packages/frontend/src/pages/Routing.tsx` (`legacyComplexityVisible` / `legacySpecificityVisible` / `isCleanAgent`) and are **sticky per agent** within a session — once a surface is revealed for an agent we keep it (so toggling complexity off mid-session doesn't yank the control away), but the stickiness compares the remembered agent against the current one, so switching agents re-evaluates from the new agent's own config and never carries a legacy reveal onto a clean agent.
+
+| | Clean agent | Legacy agent |
+|---|---|---|
+| Routing page | One unified view, **no tabs** | Tabbed view (Default / Task-specific / Custom) |
+| "Route by complexity" toggle | Hidden | Shown |
+| Task-specific tab | Hidden | Shown |
+| Custom (header) routing | Shown (cards + "Create custom tier") | Shown |
+| Deprecation banners | None | Shown on each retiring surface (`RoutingDeprecationNotice`) |
+
+**This is by _agent_, not by user.** "Old users keep routing, new users don't see it" is the right intuition but imprecise — the real axis is each agent's own config:
+
+- **New user** → every agent is clean (nothing was ever configured) → simplified view everywhere.
+- **Old user, existing agent that used complexity/task-specific** → stays legacy → full surfaces + banners, behavior untouched.
+- **Old user creating a _new_ agent** → the new agent is **clean** (it has no complexity/specificity config of its own), so it gets the **simplified view** — even though the user is "old". An old user whose agent long ago stopped using these (no active config left) is likewise treated as clean.
+
+Dev seeding (`packages/backend/src/database/seed-cohorts.ts`, `seedRoutingCohorts`) creates two demo logins so both states are visible side by side: `admin@manifest.build` (clean — Default + Custom only) and `olduser@manifest.build` (legacy — complexity + task-specific visible). Both passwords are `manifest`. Seeding is idempotent.
+
+Still to come (not in this phase): a migration assistant (task-specific → header rules, complexity → collapse to default) and a committed end date.
 
 ## Providers & Models
 
@@ -421,3 +470,5 @@ Merging the `chore: version packages` PR to `main` automatically publishes a new
 ### E2E Test Entities
 
 When adding new TypeORM entities to `database.module.ts`, also add them to the E2E test helper (`packages/backend/test/helpers.ts`) entities array. Missing entities cause `EntityMetadataNotFoundError` in services that depend on them.
+
+**Known gap (code bug):** `ReasoningContentCacheEntry` is registered in `database.module.ts` but is absent from the `entities` array in `packages/backend/test/helpers.ts`. Add it there to avoid E2E failures in services that touch that entity.

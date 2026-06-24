@@ -61,16 +61,52 @@ describe('appConfig', () => {
     expect(config.nodeEnv).toBe('production');
   });
 
-  it('defaults dbPoolMax to 20', async () => {
+  it('defaults dbPoolMax to 30', async () => {
     delete process.env['DB_POOL_MAX'];
     const config = await loadConfig();
-    expect(config.dbPoolMax).toBe(20);
+    expect(config.dbPoolMax).toBe(30);
   });
 
   it('reads DB_POOL_MAX from env', async () => {
     process.env['DB_POOL_MAX'] = '50';
     const config = await loadConfig();
     expect(config.dbPoolMax).toBe(50);
+  });
+
+  it('defaults dbTuneSession to true when DB_TUNE_SESSION is unset', async () => {
+    delete process.env['DB_TUNE_SESSION'];
+    const config = await loadConfig();
+    expect(config.dbTuneSession).toBe(true);
+  });
+
+  it('disables dbTuneSession when DB_TUNE_SESSION is "false"', async () => {
+    process.env['DB_TUNE_SESSION'] = 'false';
+    const config = await loadConfig();
+    expect(config.dbTuneSession).toBe(false);
+  });
+
+  it('defaults runMigrationsOnBoot to true when RUN_MIGRATIONS_ON_BOOT is unset', async () => {
+    delete process.env['RUN_MIGRATIONS_ON_BOOT'];
+    const config = await loadConfig();
+    expect(config.runMigrationsOnBoot).toBe(true);
+  });
+
+  it('disables runMigrationsOnBoot when RUN_MIGRATIONS_ON_BOOT is "false"', async () => {
+    process.env['RUN_MIGRATIONS_ON_BOOT'] = 'false';
+    const config = await loadConfig();
+    expect(config.runMigrationsOnBoot).toBe(false);
+  });
+
+  it('defaults shutdownDrainMs to 10000 when SHUTDOWN_DRAIN_MS is unset', async () => {
+    delete process.env['SHUTDOWN_DRAIN_MS'];
+    const config = await loadConfig();
+    expect(config.shutdownDrainMs).toBe(10000);
+  });
+
+  it('reads SHUTDOWN_DRAIN_MS from env', async () => {
+    process.env['SHUTDOWN_DRAIN_MS'] = '0';
+    const config = await loadConfig();
+    expect(config.shutdownDrainMs).toBe(0);
   });
 
   it('throws when DATABASE_URL is missing in production', async () => {
