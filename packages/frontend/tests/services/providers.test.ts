@@ -125,6 +125,38 @@ describe('validateApiKey', () => {
     expect(validateApiKey(fireworks, 'fw_' + 'a'.repeat(20))).toEqual({ valid: true });
   });
 
+  it('validates Cerebras keys by length without enforcing an undocumented prefix', () => {
+    const cerebras = getProvider('cerebras')!;
+    expect(cerebras.keyPlaceholder).toBe('Cerebras API key');
+    expect(validateApiKey(cerebras, '')).toEqual({
+      valid: false,
+      error: 'API key is required',
+    });
+    expect(validateApiKey(cerebras, 'short')).toEqual({
+      valid: false,
+      error: 'Key is too short (minimum 20 characters)',
+    });
+    expect(validateApiKey(cerebras, 'x'.repeat(20))).toEqual({ valid: true });
+  });
+
+  it('validates Pioneer key prefix and length', () => {
+    const pioneer = getProvider('pioneer')!;
+    expect(pioneer.keyPlaceholder).toBe('pio_sk_...');
+    expect(validateApiKey(pioneer, '')).toEqual({
+      valid: false,
+      error: 'API key is required',
+    });
+    expect(validateApiKey(pioneer, 'sk-wrong-prefix-that-is-long-enough')).toEqual({
+      valid: false,
+      error: 'Pioneer keys start with "pio_sk_"',
+    });
+    expect(validateApiKey(pioneer, 'pio_sk_short')).toEqual({
+      valid: false,
+      error: 'Key is too short (minimum 20 characters)',
+    });
+    expect(validateApiKey(pioneer, 'pio_sk_' + 'a'.repeat(20))).toEqual({ valid: true });
+  });
+
   it('validates AWS Bedrock raw bearer-token and legacy API-key lengths', () => {
     const bedrock = getProvider('bedrock')!;
     expect(validateApiKey(bedrock, '')).toEqual({
@@ -505,6 +537,44 @@ describe('PROVIDERS', () => {
     expect(byteplus.models).toEqual([]);
   });
 
+  it('ClinePass is subscription-only with API-key token paste flow', () => {
+    const clinePass = PROVIDERS.find((p) => p.id === 'cline-pass')!;
+    expect(clinePass).toBeDefined();
+    expect(clinePass.name).toBe('ClinePass');
+    expect(clinePass.supportsSubscription).toBe(true);
+    expect(clinePass.subscriptionOnly).toBe(true);
+    expect(clinePass.subscriptionAuthMode).toBe('token');
+    expect(clinePass.subscriptionCredentialKind).toBe('api-key');
+    expect(clinePass.subscriptionLabel).toBe('ClinePass subscription');
+    expect(clinePass.subscriptionKeyPlaceholder).toBe('Paste your ClinePass API key');
+    expect(clinePass.subscriptionSignInUrl).toBe('https://app.cline.bot');
+    expect(clinePass.subscriptionSignInLabel).toBe('Sign in to ClinePass');
+    expect(clinePass.models).toEqual([]);
+  });
+
+  it('Cerebras is an API-key provider with dynamic models', () => {
+    const cerebras = PROVIDERS.find((p) => p.id === 'cerebras')!;
+    expect(cerebras).toBeDefined();
+    expect(cerebras.name).toBe('Cerebras');
+    expect(cerebras.supportsSubscription).toBeUndefined();
+    expect(cerebras.subscriptionOnly).toBeUndefined();
+    expect(cerebras.keyPlaceholder).toBe('Cerebras API key');
+    expect(cerebras.minKeyLength).toBe(20);
+    expect(cerebras.models).toEqual([]);
+  });
+
+  it('Pioneer is an API-key provider with dynamic models', () => {
+    const pioneer = PROVIDERS.find((p) => p.id === 'pioneer')!;
+    expect(pioneer).toBeDefined();
+    expect(pioneer.name).toBe('Pioneer');
+    expect(pioneer.supportsSubscription).toBeUndefined();
+    expect(pioneer.subscriptionOnly).toBeUndefined();
+    expect(pioneer.keyPrefix).toBe('pio_sk_');
+    expect(pioneer.keyPlaceholder).toBe('pio_sk_...');
+    expect(pioneer.minKeyLength).toBe(20);
+    expect(pioneer.models).toEqual([]);
+  });
+
   it('MiniMax supports subscription with device-code flow', () => {
     const minimax = PROVIDERS.find((p) => p.id === 'minimax')!;
     expect(minimax.supportsSubscription).toBe(true);
@@ -512,8 +582,46 @@ describe('PROVIDERS', () => {
     expect(minimax.subscriptionAuthMode).toBe('device_code');
   });
 
+  it('Mistral supports Vibe subscription with token flow', () => {
+    const mistral = PROVIDERS.find((p) => p.id === 'mistral')!;
+    expect(mistral.supportsSubscription).toBe(true);
+    expect(mistral.subscriptionLabel).toBe('Mistral Vibe subscription');
+    expect(mistral.subscriptionAuthMode).toBe('token');
+    expect(mistral.subscriptionCredentialKind).toBe('api-key');
+    expect(mistral.subscriptionCredentialName).toBe('Mistral Vibe');
+    expect(mistral.subscriptionKeyPlaceholder).toBe('Paste your Mistral Vibe API key');
+    expect(mistral.subscriptionOnly).toBeUndefined();
+  });
+
   it('Qwen supports Token Plan subscription with token flow', () => {
     const qwen = PROVIDERS.find((p) => p.id === 'qwen')!;
+    expect(qwen.apiKeyEndpointRegions?.[0]).toEqual({
+      value: 'auto',
+      label: 'Auto-detect',
+    });
+    expect(qwen.apiKeyEndpointRegions).toContainEqual({
+      value: 'workspace-cn-hongkong',
+      label: 'China (Hong Kong)',
+      baseUrlPlaceholder: 'https://<workspace-id>.cn-hongkong.maas.aliyuncs.com/compatible-mode/v1',
+    });
+    expect(qwen.apiKeyEndpointRegions).toContainEqual({
+      value: 'workspace-eu-central-1',
+      label: 'Germany (Frankfurt)',
+      baseUrlPlaceholder:
+        'https://<workspace-id>.eu-central-1.maas.aliyuncs.com/compatible-mode/v1',
+    });
+    expect(qwen.apiKeyEndpointRegions).toContainEqual({
+      value: 'workspace-ap-northeast-1',
+      label: 'Japan (Tokyo)',
+      baseUrlPlaceholder:
+        'https://<workspace-id>.ap-northeast-1.maas.aliyuncs.com/compatible-mode/v1',
+    });
+    expect(qwen.apiKeyEndpointRegions).toContainEqual({
+      value: 'custom',
+      label: 'Custom endpoint',
+      baseUrlPlaceholder:
+        'https://<workspace-id>.eu-central-1.maas.aliyuncs.com/compatible-mode/v1',
+    });
     expect(qwen.supportsSubscription).toBe(true);
     expect(qwen.subscriptionLabel).toBe('Qwen Token Plan');
     expect(qwen.subscriptionAuthMode).toBe('token');
@@ -564,6 +672,19 @@ describe('PROVIDERS', () => {
     expect(cloud.subscriptionCommand).toBeUndefined();
   });
 
+  it('NousResearch is subscription-only with API-key token paste flow', () => {
+    const nous = PROVIDERS.find((p) => p.id === 'nous')!;
+    expect(nous).toBeDefined();
+    expect(nous.name).toBe('NousResearch');
+    expect(nous.supportsSubscription).toBe(true);
+    expect(nous.subscriptionOnly).toBe(true);
+    expect(nous.subscriptionAuthMode).toBe('token');
+    expect(nous.subscriptionCredentialKind).toBe('api-key');
+    expect(nous.subscriptionLabel).toBe('NousResearch subscription');
+    expect(nous.subscriptionKeyPlaceholder).toBe('Paste your NousResearch API key');
+    expect(nous.models).toEqual([]);
+  });
+
   it('Kilo is an API-key gateway provider with dynamic models', () => {
     const kilo = PROVIDERS.find((p) => p.id === 'kilo')!;
     expect(kilo).toBeDefined();
@@ -584,6 +705,13 @@ describe('PROVIDERS', () => {
     expect(getSubscriptionProviderKeyUrl('moonshot')).toBe('https://www.kimi.com/code/console');
   });
 
+  it('provides distinct API-key and subscription-key URLs for Mistral', () => {
+    expect(getRoutingProviderApiKeyUrl('mistral')).toBe('https://console.mistral.ai/api-keys/');
+    expect(getSubscriptionProviderKeyUrl('mistral')).toBe(
+      'https://chat.mistral.ai/code/extensions',
+    );
+  });
+
   it('provides only the subscription-key URL for Command Code', () => {
     expect(getRoutingProviderApiKeyUrl('commandcode')).toBeUndefined();
     expect(getSubscriptionProviderKeyUrl('commandcode')).toBe('https://commandcode.ai/studio');
@@ -594,6 +722,11 @@ describe('PROVIDERS', () => {
     expect(getSubscriptionProviderKeyUrl('byteplus')).toBe(
       'https://console.byteplus.com/ark/region:ark+ap-southeast-1/apiKey',
     );
+  });
+
+  it('provides only the subscription-key URL for Nous', () => {
+    expect(getRoutingProviderApiKeyUrl('nous')).toBeUndefined();
+    expect(getSubscriptionProviderKeyUrl('nous')).toBe('https://portal.nousresearch.com');
   });
 
   it('provides a subscription-key URL for Qwen Token Plan', () => {
@@ -661,6 +794,14 @@ describe('PROVIDERS', () => {
 
   it('provides an API key URL for Fireworks AI', () => {
     expect(getRoutingProviderApiKeyUrl('fireworks')).toBe('https://app.fireworks.ai/api-keys');
+  });
+
+  it('provides an API key URL for Cerebras', () => {
+    expect(getRoutingProviderApiKeyUrl('cerebras')).toBe('https://cloud.cerebras.ai');
+  });
+
+  it('provides an API key URL for Pioneer', () => {
+    expect(getRoutingProviderApiKeyUrl('pioneer')).toBe('https://pioneer.ai');
   });
 
   it('OpenCode Go is subscription-only with a sign-in URL', () => {
@@ -761,6 +902,51 @@ describe('PROVIDERS', () => {
     });
   });
 
+  it('ClinePass subscription key is validated with generic token length', () => {
+    const clinePass = PROVIDERS.find((p) => p.id === 'cline-pass')!;
+    expect(validateSubscriptionKey(clinePass, '')).toEqual({
+      valid: false,
+      error: 'Token is required',
+    });
+    expect(validateSubscriptionKey(clinePass, 'short')).toEqual({
+      valid: false,
+      error: 'Token is too short (minimum 10 characters)',
+    });
+    expect(validateSubscriptionKey(clinePass, 'cp-valid-token-1234')).toEqual({
+      valid: true,
+    });
+  });
+
+  it('Nous subscription key is validated with generic token length', () => {
+    const nous = PROVIDERS.find((p) => p.id === 'nous')!;
+    expect(validateSubscriptionKey(nous, '')).toEqual({
+      valid: false,
+      error: 'Token is required',
+    });
+    expect(validateSubscriptionKey(nous, 'short')).toEqual({
+      valid: false,
+      error: 'Token is too short (minimum 10 characters)',
+    });
+    expect(validateSubscriptionKey(nous, 'nous-valid-token-1234')).toEqual({
+      valid: true,
+    });
+  });
+
+  it('Mistral Vibe subscription key is validated with generic token length', () => {
+    const mistral = PROVIDERS.find((p) => p.id === 'mistral')!;
+    expect(validateSubscriptionKey(mistral, '')).toEqual({
+      valid: false,
+      error: 'Token is required',
+    });
+    expect(validateSubscriptionKey(mistral, 'short')).toEqual({
+      valid: false,
+      error: 'Token is too short (minimum 10 characters)',
+    });
+    expect(validateSubscriptionKey(mistral, 'mistral-vibe-token-1234')).toEqual({
+      valid: true,
+    });
+  });
+
   it('Kilo API key is validated with generic min-length check', () => {
     const kilo = PROVIDERS.find((p) => p.id === 'kilo')!;
     expect(validateApiKey(kilo, '')).toEqual({
@@ -828,6 +1014,12 @@ describe('getRoutingProviderApiKeyUrl', () => {
     expect(getRoutingProviderApiKeyUrl('openai')).toBe('https://platform.openai.com/api-keys');
   });
 
+  it('returns the ClinePass API-key settings URL', () => {
+    expect(getRoutingProviderApiKeyUrl('cline-pass')).toBe(
+      'https://app.cline.bot/settings/api-keys',
+    );
+  });
+
   it('returns undefined for an unknown provider', () => {
     expect(getRoutingProviderApiKeyUrl('unknown')).toBeUndefined();
   });
@@ -838,6 +1030,12 @@ describe('getRoutingProviderApiKeyUrl', () => {
 describe('getSubscriptionProviderKeyUrl', () => {
   it('returns the Ollama settings page URL for ollama-cloud', () => {
     expect(getSubscriptionProviderKeyUrl('ollama-cloud')).toBe('https://ollama.com/settings/keys');
+  });
+
+  it('returns the ClinePass API-key settings URL', () => {
+    expect(getSubscriptionProviderKeyUrl('cline-pass')).toBe(
+      'https://app.cline.bot/settings/api-keys',
+    );
   });
 
   it('returns undefined for subscription providers whose token comes from elsewhere (e.g. anthropic setup-token via CLI)', () => {

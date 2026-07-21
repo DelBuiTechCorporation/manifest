@@ -1,10 +1,21 @@
 import { A, useLocation, useNavigate } from '@solidjs/router';
-import { Show, createSignal, createEffect, onCleanup, onMount, type Component } from 'solid-js';
+import {
+  Show,
+  createSignal,
+  createEffect,
+  createResource,
+  lazy,
+  onCleanup,
+  onMount,
+  type Component,
+} from 'solid-js';
 import { useAgentName } from '../services/routing.js';
 import { authClient } from '../services/auth-client.js';
 import { agentDisplayName } from '../services/agent-display-name.js';
 import { agentPlatformIcon } from '../services/agent-platform-store.js';
 import { checkIsSelfHosted } from '../services/setup-status.js';
+import NotificationBell from './NotificationBell.jsx';
+import { getBillingStatus } from '../services/api/billing.js';
 import {
   connectionBreadcrumbName,
   connectionBreadcrumbProviderId,
@@ -14,6 +25,8 @@ import {
 } from '../services/connection-breadcrumb-store.js';
 import { providerIcon } from './ProviderIcon.jsx';
 import DuplicateAgentModal from './DuplicateAgentModal.jsx';
+
+const DevAutofixToggle = __DEV_MODE__ ? lazy(() => import('./DevAutofixToggle.jsx')) : null;
 
 const GITHUB_REPO = 'mnfst/manifest';
 const STAR_DISMISSED_KEY = 'github-star-dismissed';
@@ -41,6 +54,14 @@ const Header: Component<HeaderProps> = (props) => {
   const [isSelfHosted, setIsSelfHosted] = createSignal(false);
   const session = authClient.useSession();
   const navigate = useNavigate();
+  const [billing] = createResource(async () => {
+    try {
+      return await getBillingStatus();
+    } catch {
+      return null;
+    }
+  });
+  const isPro = () => billing()?.enabled && billing()?.plan === 'pro';
 
   onMount(() => {
     checkIsSelfHosted().then(setIsSelfHosted);
@@ -98,7 +119,7 @@ const Header: Component<HeaderProps> = (props) => {
 
   const handleLogout = async () => {
     await authClient.signOut();
-    navigate('/login', { replace: true });
+    window.location.replace('/login');
   };
 
   const handleClickOutside = (e: MouseEvent) => {
@@ -123,15 +144,15 @@ const Header: Component<HeaderProps> = (props) => {
       <div class="header__left">
         <A href="/" class="header__logo">
           <img
-            src="/logo.svg"
+            src="/logotype-white.svg"
             alt="Manifest"
-            width="152"
+            width="104"
             class="header__logo-img header__logo-img--light"
           />
           <img
-            src="/logo-white.svg"
+            src="/logotype-dark.svg"
             alt=""
-            width="152"
+            width="104"
             class="header__logo-img header__logo-img--dark"
           />
         </A>
@@ -140,14 +161,7 @@ const Header: Component<HeaderProps> = (props) => {
             Self-hosted
           </span>
         </Show>
-        {__DEV_MODE__ && (
-          <span
-            class="header__mode-badge header__mode-badge--dev"
-            title="Vite dev server (npm run dev). Not a production build."
-          >
-            Dev
-          </span>
-        )}
+        {__DEV_MODE__ && DevAutofixToggle && <DevAutofixToggle />}
         <Show when={getAgentName()}>
           <span class="header__separator">/</span>
           <A
@@ -295,6 +309,7 @@ const Header: Component<HeaderProps> = (props) => {
           </svg>
           Docs
         </a>
+        <NotificationBell />
         <Show when={!starDismissed()}>
           <div class="header__star-separator" />
           <div class="header__github-star">
@@ -356,7 +371,12 @@ const Header: Component<HeaderProps> = (props) => {
           <Show when={menuOpen()}>
             <div class="header__dropdown" role="menu">
               <div class="header__dropdown-header">
-                <span class="header__dropdown-name">{effectiveName()}</span>
+                <span class="header__dropdown-name">
+                  {effectiveName()}
+                  <Show when={isPro()}>
+                    <span class="header__pro-badge">PRO</span>
+                  </Show>
+                </span>
                 <span class="header__dropdown-email">{user()?.email ?? ''}</span>
               </div>
               <div class="header__dropdown-divider" />

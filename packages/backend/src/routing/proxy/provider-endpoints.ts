@@ -74,6 +74,11 @@ const openaiHeaders = (apiKey: string) => ({
   'Content-Type': 'application/json',
 });
 
+const pioneerHeaders = (apiKey: string) => ({
+  'X-API-Key': apiKey,
+  'Content-Type': 'application/json',
+});
+
 const openaiPath = () => '/v1/chat/completions';
 
 const anthropicHeaders = (apiKey: string, authType?: string): Record<string, string> => {
@@ -113,7 +118,7 @@ const CHATGPT_SUBSCRIPTION_BASE = 'https://chatgpt.com/backend-api';
 const BYTEPLUS_CODING_BASE = 'https://ark.ap-southeast.bytepluses.com/api/coding';
 const COMMAND_CODE_PROVIDER_BASE = 'https://api.commandcode.ai/provider';
 const KIMI_CODING_SUBSCRIPTION_BASE = 'https://api.kimi.com/coding';
-const MINIMAX_SUBSCRIPTION_BASE = 'https://api.minimax.io/anthropic';
+const MINIMAX_SUBSCRIPTION_BASE = 'https://api.minimax.io/anthropic/v1';
 const XIAOMI_MIMO_BASE = 'https://api.xiaomimimo.com';
 const XIAOMI_TOKEN_PLAN_BASE = getXiaomiTokenPlanBaseUrl();
 const QWEN_TOKEN_PLAN_BASE = 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode';
@@ -121,8 +126,10 @@ const ZAI_SUBSCRIPTION_BASE = getZaiCodingPlanBaseUrl('global');
 const OPENCODE_GO_BASE = 'https://opencode.ai/zen/go';
 const OPENCODE_ZEN_BASE = 'https://opencode.ai/zen';
 const KILO_GATEWAY_BASE = 'https://api.kilo.ai/api/gateway';
+const NOUS_PORTAL_BASE = 'https://inference-api.nousresearch.com';
 const NVIDIA_NIM_BASE = 'https://integrate.api.nvidia.com';
 const FIREWORKS_INFERENCE_BASE = 'https://api.fireworks.ai/inference';
+const PIONEER_BASE = 'https://api.pioneer.ai';
 const chatgptSubscriptionHeaders = (apiKey: string) => ({
   Authorization: `Bearer ${apiKey}`,
   'Content-Type': 'application/json',
@@ -232,6 +239,27 @@ export const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
     format: 'openai',
     ...openaiStreamUsage,
   },
+  cerebras: {
+    baseUrl: 'https://api.cerebras.ai',
+    buildHeaders: openaiHeaders,
+    buildPath: openaiPath,
+    format: 'openai',
+    ...openaiStreamUsage,
+  },
+  'cline-pass': {
+    baseUrl: 'https://api.cline.bot',
+    buildHeaders: openaiHeaders,
+    buildPath: () => '/api/v1/chat/completions',
+    format: 'openai',
+    ...openaiStreamUsage,
+  },
+  pioneer: {
+    baseUrl: PIONEER_BASE,
+    buildHeaders: pioneerHeaders,
+    buildPath: openaiPath,
+    format: 'openai',
+    ...openaiStreamUsage,
+  },
   'commandcode-anthropic': {
     baseUrl: COMMAND_CODE_PROVIDER_BASE,
     buildHeaders: anthropicApiKeyHeaders,
@@ -266,6 +294,13 @@ export const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
     format: 'openai',
     ...openaiStreamUsage,
   },
+  nous: {
+    baseUrl: NOUS_PORTAL_BASE,
+    buildHeaders: openaiHeaders,
+    buildPath: openaiPath,
+    format: 'openai',
+    ...openaiStreamUsage,
+  },
   xai: {
     baseUrl: 'https://api.x.ai',
     buildHeaders: openaiHeaders,
@@ -289,7 +324,7 @@ export const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
   'minimax-subscription': {
     baseUrl: MINIMAX_SUBSCRIPTION_BASE,
     buildHeaders: anthropicBearerHeaders,
-    buildPath: () => '/v1/messages',
+    buildPath: () => '/messages',
     format: 'anthropic',
   },
   xiaomi: {
@@ -551,7 +586,10 @@ export function buildEndpointOverride(baseUrl: string, templateKey: string): Pro
   }
   return {
     ...template,
-    baseUrl: normalizeProviderBaseUrl(baseUrl),
+    baseUrl:
+      templateKey === 'minimax-subscription'
+        ? baseUrl.replace(/\/+$/, '')
+        : normalizeProviderBaseUrl(baseUrl),
     // Preserve the template identity for body sanitization — `resolveEndpoint`
     // otherwise reports this override as the generic `'custom'` endpointKey.
     sanitizeKey: templateKey,

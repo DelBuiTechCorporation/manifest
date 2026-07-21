@@ -1,4 +1,5 @@
 import {
+  applyAnthropicAutomaticCacheControl,
   applyAnthropicMessagesMutations,
   extractThinkingBlocksFromMessagesResponse,
   toAnthropicRequest,
@@ -167,6 +168,22 @@ describe('Anthropic Adapter', () => {
       });
     });
 
+    it('drops the manual budget when forwarding adaptive thinking', () => {
+      const thinking = { type: 'adaptive', budget_tokens: 8192, display: 'omitted' };
+
+      const result = toAnthropicRequest(
+        { messages: [{ role: 'user', content: 'Hi' }], thinking },
+        'claude-opus-4-8',
+      );
+
+      expect(result.thinking).toEqual({ type: 'adaptive', display: 'omitted' });
+      expect(thinking).toEqual({
+        type: 'adaptive',
+        budget_tokens: 8192,
+        display: 'omitted',
+      });
+    });
+
     it('wraps a bare string `stop` value into stop_sequences (chat_completions accepts both shapes)', () => {
       // Cubic flagged: if a chat_completions client sends `stop: "END"`,
       // the previous code dropped it because it only handled arrays.
@@ -228,6 +245,133 @@ describe('Anthropic Adapter', () => {
       });
       expect(tools[0].cache_control).toBeUndefined();
       expect(tools[1].cache_control).toEqual({ type: 'ephemeral' });
+    });
+
+    it('maps json_schema response_format to native Anthropic output_config', () => {
+      const schema = {
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+        required: ['summary'],
+        additionalProperties: false,
+      };
+      const body = {
+        messages: [{ role: 'user', content: 'Summarize the visit.' }],
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'lookup_patient',
+              parameters: { type: 'object', properties: { id: { type: 'string' } } },
+            },
+          },
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'patient_summary',
+            description: 'Patient summary payload',
+            schema,
+            strict: true,
+          },
+        },
+      };
+      const result = toAnthropicRequest(body, 'claude-sonnet-4-20250514');
+
+      expect(result.tool_choice).toBeUndefined();
+      expect(result.output_config).toEqual({
+        format: { type: 'json_schema', schema },
+      });
+      expect(result.tools).toEqual([
+        {
+          name: 'lookup_patient',
+          input_schema: { type: 'object', properties: { id: { type: 'string' } } },
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+    });
+
+    it('uses default schema details when json_schema response_format is incomplete', () => {
+      const result = toAnthropicRequest(
+        {
+          messages: [{ role: 'user', content: 'Return structured data.' }],
+          response_format: { type: 'json_schema' },
+        },
+        'claude-sonnet-4-20250514',
+      );
+
+      expect(result.tool_choice).toBeUndefined();
+      expect(result.tools).toBeUndefined();
+      expect(result.output_config).toEqual({
+        format: { type: 'json_schema', schema: { type: 'object' } },
+      });
+    });
+
+    it('maps json_object response_format to native Anthropic object output', () => {
+      const result = toAnthropicRequest(
+        {
+          messages: [{ role: 'user', content: 'Return JSON.' }],
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: 'structured_output',
+                parameters: { type: 'object' },
+              },
+            },
+          ],
+          response_format: { type: 'json_object' },
+        },
+        'claude-sonnet-4-20250514',
+      );
+
+      expect(result.tool_choice).toBeUndefined();
+      expect(result.output_config).toEqual({
+        format: {
+          type: 'json_schema',
+          schema: { type: 'object' },
+        },
+      });
+      expect(result.tools).toEqual([
+        {
+          name: 'structured_output',
+          input_schema: { type: 'object' },
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+    });
+
+    it('does not add output_config for unsupported response_format types', () => {
+      const result = toAnthropicRequest(
+        {
+          messages: [{ role: 'user', content: 'Return text.' }],
+          response_format: { type: 'text' },
+        },
+        'claude-sonnet-4-20250514',
+      );
+
+      expect(result.tool_choice).toBeUndefined();
+      expect(result.tools).toBeUndefined();
+      expect(result.output_config).toBeUndefined();
+    });
+
+    it('preserves thinking when native structured output is requested', () => {
+      const result = toAnthropicRequest(
+        {
+          messages: [{ role: 'user', content: 'Return JSON.' }],
+          thinking: { type: 'enabled', budget_tokens: 1024 },
+          response_format: { type: 'json_object' },
+        },
+        'claude-sonnet-4-20250514',
+      );
+
+      expect(result.tool_choice).toBeUndefined();
+      expect(result.output_config).toEqual({
+        format: {
+          type: 'json_schema',
+          schema: { type: 'object' },
+        },
+      });
+      expect(result.thinking).toEqual({ type: 'enabled', budget_tokens: 1024 });
     });
 
     it('converts tool_calls in assistant messages to tool_use blocks', () => {
@@ -1443,6 +1587,45 @@ describe('Anthropic Adapter', () => {
         expect(content[2].id).toBe('toolu_first');
       });
 
+      it('passes the route context to thinkingLookup', () => {
+        const thinkingBlock = {
+          type: 'thinking',
+          thinking: 'cached reasoning',
+          signature: 'sig_cached',
+        };
+        const routeContext = {
+          provider: 'anthropic',
+          authType: 'subscription',
+          model: 'claude-sonnet-4-5-20250929',
+        };
+        const lookup = jest.fn().mockReturnValue([thinkingBlock]);
+
+        toAnthropicRequest(
+          {
+            messages: [
+              {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  {
+                    id: 'toolu_first',
+                    type: 'function',
+                    function: { name: 'search', arguments: '{}' },
+                  },
+                ],
+              },
+            ],
+          },
+          'claude-sonnet-4-5-20250929',
+          {
+            thinkingLookup: lookup,
+            thinkingRouteContext: routeContext,
+          },
+        );
+
+        expect(lookup).toHaveBeenCalledWith('toolu_first', routeContext);
+      });
+
       it('prepends multiple cached blocks in the order they were cached', () => {
         const b1 = { type: 'thinking', thinking: 'one', signature: 's1' };
         const b2 = { type: 'redacted_thinking', data: 'opaque' };
@@ -2016,6 +2199,33 @@ describe('Anthropic Adapter', () => {
   });
 
   describe('applyAnthropicMessagesMutations', () => {
+    it('drops the manual budget from native adaptive thinking without mutating the body', () => {
+      const inbound = {
+        messages: [{ role: 'user', content: 'hi' }],
+        thinking: { type: 'adaptive', budget_tokens: 8192, display: 'omitted' },
+      };
+
+      const result = applyAnthropicMessagesMutations(inbound);
+
+      expect(result.thinking).toEqual({ type: 'adaptive', display: 'omitted' });
+      expect(inbound.thinking).toEqual({
+        type: 'adaptive',
+        budget_tokens: 8192,
+        display: 'omitted',
+      });
+    });
+
+    it('preserves the budget for native manual thinking', () => {
+      const thinking = { type: 'enabled', budget_tokens: 8192 };
+
+      const result = applyAnthropicMessagesMutations({
+        messages: [{ role: 'user', content: 'hi' }],
+        thinking,
+      });
+
+      expect(result.thinking).toBe(thinking);
+    });
+
     it('preserves Anthropic server tools with their type discriminator and skips input_schema (issue #1886)', () => {
       const inbound = {
         model: 'claude-sonnet-4-20250514',
@@ -2195,6 +2405,56 @@ describe('Anthropic Adapter', () => {
       expect(tools[0].cache_control).toBeUndefined();
     });
 
+    it('adds top-level automatic cache_control when a breakpoint slot is available', () => {
+      const body = {
+        messages: [{ role: 'user', content: 'hi' }],
+        system: [{ type: 'text', text: 'instructions', cache_control: { type: 'ephemeral' } }],
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+      };
+
+      applyAnthropicAutomaticCacheControl(body);
+
+      expect((body as Record<string, unknown>).cache_control).toEqual({ type: 'ephemeral' });
+      expect(countCacheControls(body)).toBe(2);
+    });
+
+    it('keeps caller-supplied top-level automatic cache_control', () => {
+      const existing = { type: 'ephemeral' };
+      const body = {
+        cache_control: existing,
+        messages: [{ role: 'user', content: 'hi' }],
+      };
+
+      applyAnthropicAutomaticCacheControl(body);
+
+      expect(body.cache_control).toBe(existing);
+      expect(countCacheControls(body)).toBe(1);
+    });
+
+    it('does not add top-level automatic cache_control when the body is already at the Anthropic cap', () => {
+      const cache = { type: 'ephemeral' };
+      const body = {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'cached 1', cache_control: cache },
+              { type: 'text', text: 'cached 2', cache_control: cache },
+            ],
+          },
+        ],
+        system: [
+          { type: 'text', text: 'cached 3', cache_control: cache },
+          { type: 'text', text: 'cached 4', cache_control: cache },
+        ],
+      };
+
+      applyAnthropicAutomaticCacheControl(body);
+
+      expect((body as Record<string, unknown>).cache_control).toBeUndefined();
+      expect(countCacheControls(body)).toBe(4);
+    });
+
     it('defaults max_tokens to 4096 when not provided', () => {
       const result = applyAnthropicMessagesMutations({
         messages: [{ role: 'user', content: 'hi' }],
@@ -2233,6 +2493,32 @@ describe('Anthropic Adapter', () => {
       expect(content[1]).toMatchObject({ type: 'tool_use', id: 'call_1' });
     });
 
+    it('passes the route context when replaying cached thinking blocks', () => {
+      const cached = [{ type: 'thinking' as const, thinking: 'searching', signature: 'sig' }];
+      const routeContext = {
+        provider: 'anthropic',
+        authType: 'subscription',
+        model: 'claude-sonnet-4-5-20250929',
+      };
+      const lookup = jest.fn().mockReturnValue(cached);
+
+      applyAnthropicMessagesMutations(
+        {
+          messages: [
+            {
+              role: 'assistant',
+              content: [
+                { type: 'tool_use', id: 'call_1', name: 'web_search', input: { q: 'cats' } },
+              ],
+            },
+          ],
+        },
+        { thinkingLookup: lookup, thinkingRouteContext: routeContext },
+      );
+
+      expect(lookup).toHaveBeenCalledWith('call_1', routeContext);
+    });
+
     it('does not duplicate thinking blocks the client already echoed', () => {
       // Native Messages clients echo signed thinking blocks back to satisfy
       // Anthropic's signature chain. Replaying a cached copy on top would
@@ -2251,6 +2537,124 @@ describe('Anthropic Adapter', () => {
       );
       const messages = result.messages as Array<Record<string, unknown>>;
       expect(messages[1].content).toEqual(echoed.content);
+    });
+
+    it('drops unsigned thinking blocks before forwarding native Anthropic messages', () => {
+      const invalidThinking = { type: 'thinking', thinking: 'foreign reasoning', signature: '' };
+      const missingSignature = { type: 'thinking', thinking: 'fallback reasoning' };
+      const toolUse = { type: 'tool_use', id: 'call_1', name: 'web_search', input: { q: 'cats' } };
+      const inbound = {
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              invalidThinking,
+              missingSignature,
+              { type: 'text', text: 'visible answer' },
+              toolUse,
+            ],
+          },
+        ],
+      };
+
+      const result = applyAnthropicMessagesMutations(inbound);
+
+      const messages = result.messages as Array<Record<string, unknown>>;
+      expect(messages[0].content).toEqual([{ type: 'text', text: 'visible answer' }, toolUse]);
+      expect(inbound.messages[0].content).toEqual([
+        invalidThinking,
+        missingSignature,
+        { type: 'text', text: 'visible answer' },
+        toolUse,
+      ]);
+    });
+
+    it('replays cached thinking after removing an unsigned client echo', () => {
+      const cached = [
+        { type: 'thinking' as const, thinking: 'signed reasoning', signature: 'sigA' },
+      ];
+      const toolUse = { type: 'tool_use', id: 'call_1', name: 'web_search', input: { q: 'cats' } };
+      const result = applyAnthropicMessagesMutations(
+        {
+          messages: [
+            {
+              role: 'assistant',
+              content: [
+                { type: 'thinking', thinking: 'foreign reasoning', signature: '' },
+                toolUse,
+              ],
+            },
+          ],
+        },
+        { thinkingLookup: () => cached },
+      );
+
+      const messages = result.messages as Array<Record<string, unknown>>;
+      expect(messages[0].content).toEqual([cached[0], toolUse]);
+    });
+
+    it('does not replay cached thinking when a redacted thinking echo remains after stripping', () => {
+      const cached = [{ type: 'thinking' as const, thinking: 'cached', signature: 'sigA' }];
+      const redacted = { type: 'redacted_thinking', data: 'opaque' };
+      const toolUse = { type: 'tool_use', id: 'call_1', name: 'web_search', input: { q: 'cats' } };
+      const result = applyAnthropicMessagesMutations(
+        {
+          messages: [
+            {
+              role: 'assistant',
+              content: [
+                { type: 'thinking', thinking: 'foreign reasoning', signature: '' },
+                redacted,
+                toolUse,
+              ],
+            },
+          ],
+        },
+        { thinkingLookup: () => cached },
+      );
+
+      const messages = result.messages as Array<Record<string, unknown>>;
+      expect(messages[0].content).toEqual([redacted, toolUse]);
+    });
+
+    it('keeps sanitized tool_use turns when no cached thinking is available', () => {
+      const toolUse = { type: 'tool_use', id: 'call_1', name: 'web_search', input: { q: 'cats' } };
+      const result = applyAnthropicMessagesMutations(
+        {
+          messages: [
+            {
+              role: 'assistant',
+              content: [
+                { type: 'thinking', thinking: 'foreign reasoning', signature: '' },
+                toolUse,
+              ],
+            },
+          ],
+        },
+        { thinkingLookup: () => null },
+      );
+
+      const messages = result.messages as Array<Record<string, unknown>>;
+      expect(messages[0].content).toEqual([toolUse]);
+    });
+
+    it('drops assistant turns that only contain unsigned thinking blocks', () => {
+      const invalidThinking = { type: 'thinking', thinking: 'foreign reasoning', signature: '' };
+      const inbound = {
+        messages: [
+          { role: 'user', content: 'first' },
+          { role: 'assistant', content: [invalidThinking] },
+          { role: 'user', content: 'next' },
+        ],
+      };
+
+      const result = applyAnthropicMessagesMutations(inbound);
+
+      expect(result.messages).toEqual([
+        { role: 'user', content: 'first' },
+        { role: 'user', content: 'next' },
+      ]);
+      expect(inbound.messages[1].content).toEqual([invalidThinking]);
     });
 
     it('does not touch messages when thinkingLookup returns nothing', () => {

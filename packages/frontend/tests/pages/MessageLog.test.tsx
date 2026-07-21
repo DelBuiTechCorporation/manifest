@@ -5,6 +5,7 @@ import { createSignal } from 'solid-js';
 let mockAgentName = 'test-agent';
 let mockSearchParams: Record<string, string | undefined> = {};
 let mockSearchAgentAccessor: (() => string | undefined) | null = null;
+const mockSetSearchParams = vi.fn();
 const mockNavigate = vi.fn();
 vi.mock('@solidjs/router', () => ({
   useParams: () => ({ agentName: mockAgentName }),
@@ -13,8 +14,17 @@ vi.mock('@solidjs/router', () => ({
       get agent() {
         return mockSearchAgentAccessor ? mockSearchAgentAccessor() : mockSearchParams.agent;
       },
+      get status() {
+        return mockSearchParams.status;
+      },
+      get request() {
+        return mockSearchParams.request;
+      },
+      get range() {
+        return mockSearchParams.range;
+      },
     },
-    vi.fn(),
+    mockSetSearchParams,
   ],
   useNavigate: () => mockNavigate,
   A: (props: any) => (
@@ -39,7 +49,7 @@ const mockGetRoutingStatus = vi.fn();
 const mockListHeaderTiers = vi.fn();
 const mockSetMessageFeedback = vi.fn();
 const mockClearMessageFeedback = vi.fn();
-vi.mock("../../src/services/api.js", () => ({
+vi.mock('../../src/services/api.js', () => ({
   getMessages: (...args: unknown[]) => mockGetMessages(...args),
   getMessageFilterOptions: (...args: unknown[]) => mockGetMessageFilterOptions(...args),
   getAgents: (...args: unknown[]) => mockGetAgents(...args),
@@ -50,6 +60,96 @@ vi.mock("../../src/services/api.js", () => ({
   listHeaderTiers: (...args: unknown[]) => mockListHeaderTiers(...args),
   setMessageFeedback: (...args: unknown[]) => mockSetMessageFeedback(...args),
   clearMessageFeedback: (...args: unknown[]) => mockClearMessageFeedback(...args),
+}));
+
+const mockGetProviderConnections = vi.fn().mockResolvedValue({
+  providers: [
+    {
+      provider: 'openai',
+      auth_type: 'api_key',
+      display_name: null,
+      connection_count: 1,
+      total_models: 0,
+      connections: [
+        {
+          id: 'conn-openai-1',
+          label: 'Default',
+          key_prefix: null,
+          priority: 0,
+          connected_at: '',
+          models_fetched_at: null,
+          cached_model_count: 0,
+          is_active: true,
+        },
+      ],
+    },
+    {
+      provider: 'anthropic',
+      auth_type: 'subscription',
+      display_name: null,
+      connection_count: 1,
+      total_models: 0,
+      connections: [
+        {
+          id: 'conn-anthropic-1',
+          label: 'Team',
+          key_prefix: null,
+          priority: 0,
+          connected_at: '',
+          models_fetched_at: null,
+          cached_model_count: 0,
+          is_active: false,
+        },
+      ],
+    },
+    {
+      provider: 'custom:abc-123',
+      auth_type: 'api_key',
+      display_name: 'Cohere',
+      connection_count: 1,
+      total_models: 0,
+      connections: [
+        {
+          id: 'conn-custom-1',
+          label: 'Default',
+          key_prefix: null,
+          priority: 0,
+          connected_at: '',
+          models_fetched_at: null,
+          cached_model_count: 0,
+          is_active: true,
+        },
+      ],
+    },
+  ],
+  model_counts: {},
+});
+vi.mock('../../src/services/api/providers.js', () => ({
+  getProviders: (...args: unknown[]) => mockGetProviderConnections(...args),
+}));
+
+vi.mock('../../src/components/MultiSelect.jsx', () => ({
+  default: (props: any) => (
+    <select
+      data-testid="multiselect"
+      aria-label={props.label}
+      value={props.values?.[0] ?? ''}
+      onChange={(e: any) => {
+        const value = e.target.value;
+        props.onChange(value ? [value] : []);
+      }}
+    >
+      <option value="">{props.placeholder}</option>
+      {props.options?.map((o: any) => (
+        <option value={o.value}>{o.label}</option>
+      ))}
+    </select>
+  ),
+}));
+
+const mockGetBillingStatus = vi.fn().mockResolvedValue({ enabled: false, plan: 'free' });
+vi.mock('../../src/services/api/billing.js', () => ({
+  getBillingStatus: (...args: unknown[]) => mockGetBillingStatus(...args),
 }));
 
 vi.mock('../../src/services/sse.js', () => ({
@@ -68,6 +168,8 @@ vi.mock('../../src/services/formatters.js', () => ({
   formatCost: (v: number) => `$${v.toFixed(2)}`,
   formatNumber: (v: number) => String(v),
   formatStatus: (s: string) => s,
+  formatErrorOrigin: (o: string | null | undefined) => o ?? null,
+  formatErrorClass: (c: string | null | undefined) => c ?? null,
   formatTime: (t: string) => t,
   formatDuration: (ms: number) => (ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`),
   formatErrorMessage: (s: string) => s,
@@ -112,6 +214,12 @@ vi.mock('../../src/components/FeedbackModal.jsx', () => ({
 
 vi.mock('../../src/components/InfoTooltip.jsx', () => ({
   default: () => <span data-testid="info-tooltip" />,
+}));
+
+vi.mock('../../src/components/RequestDrawer.jsx', () => ({
+  default: (props: { messageId: string | null }) => (
+    <div data-testid="request-drawer" data-message-id={props.messageId ?? ''} />
+  ),
 }));
 
 vi.mock('../../src/components/Select.jsx', () => ({
@@ -194,6 +302,19 @@ const messagesData = {
   providers: ['anthropic', 'openai'],
 };
 
+const selectWithOption = (container: HTMLElement, optionText: string): HTMLSelectElement => {
+  const select = Array.from(
+    container.querySelectorAll<HTMLSelectElement>('[data-testid="select"]'),
+  ).find((candidate) => candidate.textContent?.includes(optionText));
+  expect(select).toBeDefined();
+  return select!;
+};
+
+const connectionMultiselect = (container: HTMLElement) =>
+  container.querySelector(
+    '[data-testid="multiselect"][aria-label="Connection filter"]',
+  ) as HTMLSelectElement;
+
 describe('MessageLog', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -209,18 +330,19 @@ describe('MessageLog', () => {
     mockGetSpecificityAssignments.mockResolvedValue([]);
     mockGetRoutingStatus.mockResolvedValue({ enabled: false });
     mockListHeaderTiers.mockResolvedValue([]);
+    mockGetBillingStatus.mockResolvedValue({ enabled: false, plan: 'free' });
   });
 
-  it('renders Messages heading', () => {
+  it('renders Requests heading', () => {
     mockGetMessages.mockResolvedValue(messagesData);
     render(() => <MessageLog />);
-    expect(screen.getByText('Messages')).toBeDefined();
+    expect(screen.getByText('Requests')).toBeDefined();
   });
 
   it('renders breadcrumb subtitle', () => {
     mockGetMessages.mockResolvedValue(messagesData);
     render(() => <MessageLog />);
-    expect(screen.getByText(/Full log of every LLM call/)).toBeDefined();
+    expect(screen.getByText(/Full log of requests from your app/)).toBeDefined();
   });
 
   it('shows loading skeleton while fetching', () => {
@@ -281,7 +403,7 @@ describe('MessageLog', () => {
     });
     const { container } = render(() => <MessageLog />);
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('No messages yet');
+      expect(container.textContent).toContain('No requests yet');
     });
   });
 
@@ -292,16 +414,20 @@ describe('MessageLog', () => {
       const selects = container.querySelectorAll('[data-testid="select"]');
       expect(selects.length).toBeGreaterThanOrEqual(1);
     });
-    const selects = container.querySelectorAll('[data-testid="select"]');
     mockGetMessages.mockResolvedValue({
       items: [],
       next_cursor: null,
       total_count: 0,
       providers: ['openai'],
     });
-    await fireEvent.change(selects[0], { target: { value: 'openai' } });
+    await vi.waitFor(() =>
+      expect(connectionMultiselect(container)?.textContent).toContain('OpenAI · Default'),
+    );
+    await fireEvent.change(connectionMultiselect(container), {
+      target: { value: 'conn-openai-1' },
+    });
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('No messages match your filters');
+      expect(container.textContent).toContain('No requests match your filters');
     });
   });
 
@@ -322,7 +448,7 @@ describe('MessageLog', () => {
     await fireEvent.change(selects[0], { target: { value: 'openai' } });
     await vi.waitFor(() => {
       expect(container.textContent).not.toContain('Waiting for data');
-      expect(container.textContent).not.toContain('No messages yet');
+      expect(container.textContent).not.toContain('No requests yet');
     });
   });
 
@@ -335,22 +461,39 @@ describe('MessageLog', () => {
     });
   });
 
-  it('renders provider display names in the filter dropdown', async () => {
+  it('lists every connection in the filter, inactive ones included', async () => {
     mockGetMessages.mockResolvedValue(messagesData);
-    mockGetMessageFilterOptions.mockResolvedValue({
-      providers: ['anthropic', 'openai', 'unknown-provider'],
-    });
     const { container } = render(() => <MessageLog />);
     await vi.waitFor(() => {
-      const select = container.querySelector('[data-testid="select"]');
-      expect(select).not.toBeNull();
-      // Known providers resolve to display names
-      expect(select!.textContent).toContain('Anthropic');
-      expect(select!.textContent).toContain('OpenAI');
-      // Unknown providers fall back to the raw ID
-      expect(select!.textContent).toContain('unknown-provider');
-      expect(select!.textContent).toContain('All providers');
+      const ms = connectionMultiselect(container);
+      expect(ms).not.toBeNull();
+      // Connection labels are "<provider display name> · <key label>".
+      expect(ms.textContent).toContain('OpenAI · Default');
+      // Inactive connections stay listed: the log keeps their history.
+      expect(ms.textContent).toContain('Anthropic · Team');
+      expect(ms.textContent).toContain('All connections');
     });
+  });
+
+  it('sends the selected connection ids to the API', async () => {
+    mockGetMessages.mockResolvedValue(messagesData);
+    const { container } = render(() => <MessageLog />);
+    await vi.waitFor(() =>
+      expect(connectionMultiselect(container)?.textContent).toContain('OpenAI · Default'),
+    );
+    mockGetMessages.mockClear();
+    await fireEvent.change(connectionMultiselect(container), {
+      target: { value: 'conn-openai-1' },
+    });
+    await vi.waitFor(() => {
+      expect(mockGetMessages).toHaveBeenCalledWith(
+        expect.objectContaining({ connections: 'conn-openai-1' }),
+      );
+    });
+    expect(mockSetSearchParams).toHaveBeenCalledWith(
+      { connections: 'conn-openai-1' },
+      { replace: true },
+    );
   });
 
   it('debounces cost filter inputs', async () => {
@@ -493,8 +636,133 @@ describe('MessageLog', () => {
     });
   });
 
-  describe('error tooltip', () => {
-    it('shows tooltip when error_message is present on a failed row', async () => {
+  it('filters messages by failed status and writes the URL param', async () => {
+    mockGetMessages.mockResolvedValue(messagesData);
+    const { container } = render(() => <MessageLog />);
+    await vi.waitFor(() => {
+      const selects = container.querySelectorAll('[data-testid="select"]');
+      expect(selects.length).toBeGreaterThanOrEqual(3);
+    });
+
+    mockGetMessages.mockClear();
+    const statusSelect = selectWithOption(container, 'Failed');
+    expect(statusSelect.textContent).toContain('Success');
+    expect(statusSelect.textContent).not.toContain('Rate limited');
+    expect(statusSelect.textContent).not.toContain('Handled fallback');
+    await fireEvent.change(statusSelect, { target: { value: 'failed' } });
+
+    await vi.waitFor(() => {
+      expect(mockGetMessages).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
+    });
+    expect(mockSetSearchParams).toHaveBeenCalledWith({ status: 'failed' }, { replace: true });
+  });
+
+  it('filters messages by period range', async () => {
+    mockGetMessages.mockResolvedValue(messagesData);
+    const { container } = render(() => <MessageLog />);
+    await vi.waitFor(() => {
+      expect(selectWithOption(container, 'All time')).toBeDefined();
+    });
+
+    const rangeSelect = selectWithOption(container, 'All time');
+    expect(rangeSelect.textContent).toContain('Last 24 hours');
+    expect(rangeSelect.textContent).toContain('Last 7 days');
+    expect(rangeSelect.textContent).toContain('Last 365 days');
+
+    mockGetMessages.mockClear();
+    await fireEvent.change(rangeSelect, { target: { value: '7d' } });
+
+    await vi.waitFor(() => {
+      expect(mockGetMessages).toHaveBeenCalledWith(expect.objectContaining({ range: '7d' }));
+    });
+    expect(mockSetSearchParams).toHaveBeenCalledWith({ range: '7d' }, { replace: true });
+  });
+
+  it('clamps a Pro-range deep link before loading data for a free plan', async () => {
+    mockSearchParams = { range: '365d' };
+    mockGetBillingStatus.mockResolvedValue({ enabled: true, plan: 'free' });
+    mockGetMessages.mockResolvedValue(messagesData);
+
+    render(() => <MessageLog />);
+
+    await vi.waitFor(() => {
+      expect(mockGetMessages).toHaveBeenCalledWith(expect.objectContaining({ range: '7d' }));
+    });
+    expect(mockGetMessages).not.toHaveBeenCalledWith(expect.objectContaining({ range: '365d' }));
+    await vi.waitFor(() => {
+      expect(mockSetSearchParams).toHaveBeenCalledWith({ range: '7d' }, { replace: true });
+    });
+  });
+
+  it('filters messages by attempt status (plain select, URL-synced)', async () => {
+    mockGetMessages.mockResolvedValue(messagesData);
+    const { container } = render(() => <MessageLog />);
+    await vi.waitFor(() => {
+      expect(selectWithOption(container, 'All attempt statuses')).toBeDefined();
+    });
+    const attemptSelect = selectWithOption(container, 'All attempt statuses');
+    expect(attemptSelect.textContent).toContain('With a failed attempt');
+    expect(attemptSelect.textContent).toContain('With a succeeded attempt');
+
+    mockGetMessages.mockClear();
+    await fireEvent.change(attemptSelect, { target: { value: 'has_failed' } });
+    await vi.waitFor(() => {
+      expect(mockGetMessages).toHaveBeenCalledWith(
+        expect.objectContaining({ attempts: 'has_failed' }),
+      );
+    });
+    expect(mockSetSearchParams).toHaveBeenCalledWith({ attempts: 'has_failed' }, { replace: true });
+  });
+
+  it('filters messages by recovery reading (plain select, URL-synced)', async () => {
+    mockGetMessages.mockResolvedValue(messagesData);
+    const { container } = render(() => <MessageLog />);
+    await vi.waitFor(() => {
+      expect(selectWithOption(container, 'All attempts')).toBeDefined();
+    });
+
+    const triggerSelect = selectWithOption(container, 'All attempts');
+    expect(triggerSelect.textContent).toContain('With any recovery attempt');
+    expect(triggerSelect.textContent).toContain('With an auto-fix attempt');
+    expect(triggerSelect.textContent).toContain('With a fallback attempt');
+    expect(triggerSelect.textContent).toContain('No recovery attempt');
+
+    mockGetMessages.mockClear();
+    await fireEvent.change(triggerSelect, { target: { value: 'fallback' } });
+    await vi.waitFor(() => {
+      expect(mockGetMessages).toHaveBeenCalledWith(
+        expect.objectContaining({ trigger: 'fallback' }),
+      );
+    });
+    expect(mockSetSearchParams).toHaveBeenCalledWith({ trigger: 'fallback' }, { replace: true });
+
+    // 'With any recovery attempt' folds both kinds on the wire, so it matches
+    // exactly what the recovered-requests deep links send.
+    mockGetMessages.mockClear();
+    await fireEvent.change(selectWithOption(container, 'All attempts'), {
+      target: { value: 'any' },
+    });
+    await vi.waitFor(() => {
+      expect(mockGetMessages).toHaveBeenCalledWith(
+        expect.objectContaining({ trigger: 'autofix,fallback' }),
+      );
+    });
+  });
+
+  it('seeds the status filter from the status search param', async () => {
+    mockSearchParams = { status: 'failed' };
+    mockGetMessages.mockResolvedValue(messagesData);
+    render(() => <MessageLog />);
+
+    await vi.waitFor(() => {
+      expect(mockGetMessages).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
+    });
+  });
+
+  describe('status cell', () => {
+    it('renders a failed row as a Failed badge with no hover tooltip', async () => {
+      // The status-cell hover tooltip was removed — error detail is shown in the
+      // expanded accordion now, so the cell is just the binary Failed pill.
       const dataWithError = {
         ...messagesData,
         items: [
@@ -508,6 +776,7 @@ describe('MessageLog', () => {
             total_tokens: 0,
             cost: 0,
             status: 'error',
+            error_origin: 'provider',
             error_message: '401 Unauthorized: invalid API key',
           },
         ],
@@ -515,48 +784,11 @@ describe('MessageLog', () => {
       mockGetMessages.mockResolvedValue(dataWithError);
       const { container } = render(() => <MessageLog />);
       await vi.waitFor(() => {
-        const tooltip = container.querySelector('.status-badge-tooltip');
-        expect(tooltip).not.toBeNull();
-        const bubble = container.querySelector('.status-badge-tooltip__bubble');
-        expect(bubble).not.toBeNull();
-        expect(bubble!.textContent).toBe('401 Unauthorized: invalid API key');
+        const badge = container.querySelector('.status-badge--error');
+        expect(badge).not.toBeNull();
+        expect(badge!.textContent).toContain('Failed');
       });
-    });
-
-    it('does not show tooltip when error_message is absent', async () => {
-      mockGetMessages.mockResolvedValue(messagesData);
-      const { container } = render(() => <MessageLog />);
-      await vi.waitFor(() => {
-        expect(container.textContent).toContain('msg-1234');
-        const tooltip = container.querySelector('.status-badge-tooltip');
-        expect(tooltip).toBeNull();
-      });
-    });
-
-    it('sets aria-label on the tooltip wrapper', async () => {
-      const dataWithError = {
-        ...messagesData,
-        items: [
-          {
-            id: 'msg-err99999',
-            timestamp: '2026-02-18T10:00:00Z',
-            agent_name: 'test-agent',
-            model: 'gpt-4o',
-            input_tokens: 0,
-            output_tokens: 0,
-            total_tokens: 0,
-            cost: 0,
-            status: 'error',
-            error_message: 'timeout',
-          },
-        ],
-      };
-      mockGetMessages.mockResolvedValue(dataWithError);
-      const { container } = render(() => <MessageLog />);
-      await vi.waitFor(() => {
-        const tooltip = container.querySelector('.status-badge-tooltip');
-        expect(tooltip?.getAttribute('aria-label')).toBe('timeout');
-      });
+      expect(container.querySelector('.status-badge-tooltip')).toBeNull();
     });
   });
 
@@ -629,6 +861,29 @@ describe('MessageLog', () => {
     });
   });
 
+  it('does not send an origin param by default — no origin is hidden', async () => {
+    mockGetMessages.mockResolvedValue(messagesData);
+    render(() => <MessageLog />);
+    await vi.waitFor(() => expect(mockGetMessages).toHaveBeenCalled());
+
+    const query = mockGetMessages.mock.calls[0][0] as Record<string, string>;
+    expect(query.origin).toBeUndefined();
+  });
+
+  it('narrows the log to Manifest-authored failures via the origin filter', async () => {
+    mockGetMessages.mockResolvedValue(messagesData);
+    const { container } = render(() => <MessageLog />);
+    await vi.waitFor(() => expect(mockGetMessages).toHaveBeenCalled());
+
+    const originSelect = selectWithOption(container, 'All origins');
+    await fireEvent.change(originSelect, { target: { value: 'manifest' } });
+
+    await vi.waitFor(() => {
+      const last = mockGetMessages.mock.calls.at(-1)![0] as Record<string, string>;
+      expect(last.origin).toBe('manifest');
+    });
+  });
+
   it('clears all filters when Clear filters button is clicked', async () => {
     mockGetMessages.mockResolvedValue(messagesData);
     const { container } = render(() => <MessageLog />);
@@ -637,16 +892,20 @@ describe('MessageLog', () => {
       expect(selects.length).toBeGreaterThanOrEqual(1);
     });
     // Set a filter to trigger filtered empty state
-    const selects = container.querySelectorAll('[data-testid="select"]');
     mockGetMessages.mockResolvedValue({
       items: [],
       next_cursor: null,
       total_count: 0,
       providers: ['openai'],
     });
-    await fireEvent.change(selects[0], { target: { value: 'openai' } });
+    await vi.waitFor(() =>
+      expect(connectionMultiselect(container)?.textContent).toContain('OpenAI · Default'),
+    );
+    await fireEvent.change(connectionMultiselect(container), {
+      target: { value: 'conn-openai-1' },
+    });
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('No messages match your filters');
+      expect(container.textContent).toContain('No requests match your filters');
     });
     // Click Clear filters
     const clearBtn = container.querySelector('.btn--outline')!;
@@ -771,7 +1030,7 @@ describe('MessageLog', () => {
           agent_name: 'test-agent',
           model: 'custom:abc-123/my-llama',
           provider: 'custom:abc-123',
-          custom_provider_name: 'Cerebras',
+          custom_provider_name: 'Cohere',
           input_tokens: 100,
           output_tokens: 50,
           total_tokens: 150,
@@ -785,14 +1044,14 @@ describe('MessageLog', () => {
       next_cursor: null,
       total_count: 1,
       providers: ['custom:abc-123'],
-      provider_labels: { 'custom:abc-123': 'Cerebras' },
+      provider_labels: { 'custom:abc-123': 'Cohere' },
     };
 
     it('renders custom provider icon in message rows', async () => {
       mockGetMessages.mockResolvedValue(customMessagesData);
       const { container } = render(() => <MessageLog />);
       await vi.waitFor(() => {
-        const img = container.querySelector('img[alt="Cerebras"]');
+        const img = container.querySelector('img[alt="Cohere"]');
         expect(img).not.toBeNull();
       });
     });
@@ -806,15 +1065,11 @@ describe('MessageLog', () => {
       });
     });
 
-    it('labels the provider filter option with the custom provider name', async () => {
+    it('labels the connection filter option with the custom provider name', async () => {
       mockGetMessages.mockResolvedValue(customMessagesData);
-      mockGetMessageFilterOptions.mockResolvedValue({
-        providers: ['custom:abc-123'],
-        provider_labels: { 'custom:abc-123': 'Cerebras' },
-      });
       const { container } = render(() => <MessageLog />);
       await vi.waitFor(() => {
-        expect(container.textContent).toContain('Cerebras');
+        expect(connectionMultiselect(container)?.textContent).toContain('Cohere · Default');
       });
     });
 
@@ -842,7 +1097,7 @@ describe('MessageLog', () => {
       mockGetMessages.mockResolvedValue(customMessagesData);
       const { container } = render(() => <MessageLog />);
       await vi.waitFor(() => {
-        expect(container.querySelector('img[alt="Cerebras"]')).not.toBeNull();
+        expect(container.querySelector('img[alt="Cohere"]')).not.toBeNull();
         expect(container.textContent).not.toContain('custom:abc-123/');
       });
     });
@@ -858,17 +1113,21 @@ describe('MessageLog', () => {
       });
 
       // Set a filter
-      const selects = container.querySelectorAll('[data-testid="select"]');
       mockGetMessages.mockResolvedValue({
         items: [],
         next_cursor: null,
         total_count: 0,
         providers: ['openai'],
       });
-      await fireEvent.change(selects[0], { target: { value: 'openai' } });
+      await vi.waitFor(() =>
+        expect(connectionMultiselect(container)?.textContent).toContain('OpenAI · Default'),
+      );
+      await fireEvent.change(connectionMultiselect(container), {
+        target: { value: 'conn-openai-1' },
+      });
 
       await vi.waitFor(() => {
-        expect(container.textContent).toContain('No messages match your filters');
+        expect(container.textContent).toContain('No requests match your filters');
       });
 
       // Click clear filters
@@ -897,7 +1156,7 @@ describe('MessageLog', () => {
     });
   });
 
-  it("shows the per-request cost for OpenCode Go subscription messages", async () => {
+  it('shows the per-request cost for OpenCode Go subscription messages', async () => {
     const dataWithPerRequestSub = {
       ...messagesData,
       items: [{ ...messagesData.items[0], auth_type: 'subscription', cost: 0.013636 }],
@@ -907,10 +1166,8 @@ describe('MessageLog', () => {
     const { container } = render(() => <MessageLog />);
     await vi.waitFor(() => {
       // Per-request subscriptions (OpenCode Go) carry real costs — don't hide them.
-      expect(container.textContent).toContain("$0.01");
-      expect(
-        container.querySelector('[title^="Per-request subscription cost:"]'),
-      ).not.toBeNull();
+      expect(container.textContent).toContain('$0.01');
+      expect(container.querySelector('[title^="Per-request subscription cost:"]')).not.toBeNull();
     });
   });
 
@@ -978,7 +1235,7 @@ describe('MessageLog', () => {
     mockGetMessages.mockResolvedValue(messagesData);
     render(() => <MessageLog />);
     // Meta is mocked as null, just ensure it renders without error
-    expect(screen.getByText('Messages')).toBeDefined();
+    expect(screen.getByText('Requests')).toBeDefined();
   });
 
   it('renders routing tier badge when present', async () => {
@@ -1013,10 +1270,10 @@ describe('MessageLog', () => {
     mockGetMessages.mockResolvedValue(dataWithFallback);
     const { container } = render(() => <MessageLog />);
     await vi.waitFor(() => {
-      const badge = container.querySelector('.tier-badge--fallback');
+      // Fallback is now shown in the Self-heal column, not a Model-cell tier badge.
+      const badge = container.querySelector('[title="Fallback"]');
       expect(badge).not.toBeNull();
-      expect(badge!.textContent).toBe('fallback');
-      expect(badge!.getAttribute('title')).toContain('gpt-4o');
+      expect(badge!.getAttribute('title')).toBe('Fallback');
     });
   });
 
@@ -1030,25 +1287,27 @@ describe('MessageLog', () => {
     });
   });
 
-  it('renders fallback_error status with orange Handled badge', async () => {
-    const dataWithHandled = {
+  it('renders a non-ok row as a binary Failed status (fallback_error is no longer its own pill)', async () => {
+    const dataWithFailure = {
       ...messagesData,
       items: [
         {
           ...messagesData.items[0],
           status: 'fallback_error',
           model: 'gemini-flash',
+          error_origin: 'provider',
           error_message: 'Provider returned HTTP 429, routed to fallback',
         },
       ],
       total_count: 1,
     };
-    mockGetMessages.mockResolvedValue(dataWithHandled);
+    mockGetMessages.mockResolvedValue(dataWithFailure);
     const { container } = render(() => <MessageLog />);
     await vi.waitFor(() => {
-      const badge = container.querySelector('.status-badge--fallback_error');
+      expect(container.querySelector('.status-badge--fallback_error')).toBeNull();
+      const badge = container.querySelector('.status-badge--error');
       expect(badge).not.toBeNull();
-      expect(badge!.textContent).toBe('fallback_error');
+      expect(badge!.textContent).toContain('Failed');
     });
   });
 
@@ -1061,7 +1320,9 @@ describe('MessageLog', () => {
     });
   });
 
-  it('scrolls to fallback success when clicking Handled badge', async () => {
+  it('shows the fallback trigger badge on the recovered (retry) row', async () => {
+    // The redesign moved the fallback indicator to the Trigger column, shown on
+    // the row that carries fallback_from_model (the recovered/retry row).
     const dataWithChain = {
       ...messagesData,
       items: [
@@ -1103,167 +1364,26 @@ describe('MessageLog', () => {
     mockGetMessages.mockResolvedValue(dataWithChain);
     const { container } = render(() => <MessageLog />);
     await vi.waitFor(() => {
-      const badge = container.querySelector('.status-badge--fallback_error');
+      const badge = container.querySelector('[title="Fallback"]');
       expect(badge).not.toBeNull();
+      expect(badge!.getAttribute('title')).toBe('Fallback');
     });
-    const successRow = container.querySelector('#msg-success-1');
-    const scrollSpy = vi.fn();
-    if (successRow) {
-      successRow.scrollIntoView = scrollSpy;
-    }
-    const badge = container.querySelector('.status-badge--fallback_error')!;
-    fireEvent.click(badge);
-    expect(scrollSpy).toHaveBeenCalled();
+    // The badge lives on the recovered row, and there's exactly one (the failed
+    // original carries no fallback_from_model, so no Self-heal badge).
+    expect(container.querySelectorAll('[title="Fallback"]').length).toBe(1);
+    const successRow = container.querySelector('#msg-success-1')!;
+    expect(successRow.querySelector('[title="Fallback"]')).not.toBeNull();
   });
 
-  describe('feedback', () => {
-    it('calls setMessageFeedback with like when thumb up is clicked', async () => {
-      mockSetMessageFeedback.mockResolvedValue(undefined);
-      mockGetMessages.mockResolvedValue(messagesData);
-      const { container } = render(() => <MessageLog />);
-      await vi.waitFor(() => {
-        expect(container.querySelector('.feedback-btn')).not.toBeNull();
-      });
-      const likeBtn = container.querySelector('.feedback-btn') as HTMLElement;
-      fireEvent.click(likeBtn);
-      expect(mockSetMessageFeedback).toHaveBeenCalledWith('msg-12345678', { rating: 'like' });
-    });
-
-    it('calls setMessageFeedback with dislike and opens modal when thumb down is clicked', async () => {
-      mockSetMessageFeedback.mockResolvedValue(undefined);
-      mockGetMessages.mockResolvedValue(messagesData);
-      const { container } = render(() => <MessageLog />);
-      await vi.waitFor(() => {
-        expect(container.querySelector('.feedback-btn')).not.toBeNull();
-      });
-      const dislikeBtn = container.querySelectorAll('.feedback-btn')[1] as HTMLElement;
-      fireEvent.click(dislikeBtn);
-      expect(mockSetMessageFeedback).toHaveBeenCalledWith('msg-12345678', { rating: 'dislike' });
-      const modal = container.querySelector('[data-testid="feedback-modal"]');
-      expect(modal?.getAttribute('data-open')).toBe('true');
-    });
-
-    it('calls clearMessageFeedback when active like is clicked', async () => {
-      mockClearMessageFeedback.mockResolvedValue(undefined);
-      const dataWithFeedback = {
-        ...messagesData,
-        items: [{ ...messagesData.items[0], feedback_rating: 'like' }, messagesData.items[1]],
-      };
-      mockGetMessages.mockResolvedValue(dataWithFeedback);
-      const { container } = render(() => <MessageLog />);
-      await vi.waitFor(() => {
-        expect(container.querySelector('.feedback-btn--active-like')).not.toBeNull();
-      });
-      const likeBtn = container.querySelector('.feedback-btn--active-like') as HTMLElement;
-      fireEvent.click(likeBtn);
-      expect(mockClearMessageFeedback).toHaveBeenCalledWith('msg-12345678');
-    });
-
-    it('submits feedback details from modal', async () => {
-      mockSetMessageFeedback.mockResolvedValue(undefined);
-      mockGetMessages.mockResolvedValue(messagesData);
-      const { container } = render(() => <MessageLog />);
-      await vi.waitFor(() => {
-        expect(container.querySelector('.feedback-btn')).not.toBeNull();
-      });
-      // Click dislike to open modal
-      const dislikeBtn = container.querySelectorAll('.feedback-btn')[1] as HTMLElement;
-      fireEvent.click(dislikeBtn);
-      // Submit via modal
-      const submitBtn = container.querySelector('[data-testid="feedback-submit"]') as HTMLElement;
-      fireEvent.click(submitBtn);
-      expect(mockSetMessageFeedback).toHaveBeenCalledWith('msg-12345678', {
-        rating: 'dislike',
-        tags: ['Too slow'],
-        details: 'test',
-      });
-    });
-
-    it('closes feedback modal without submitting', async () => {
-      mockSetMessageFeedback.mockResolvedValue(undefined);
-      mockGetMessages.mockResolvedValue(messagesData);
-      const { container } = render(() => <MessageLog />);
-      await vi.waitFor(() => {
-        expect(container.querySelector('.feedback-btn')).not.toBeNull();
-      });
-      const dislikeBtn = container.querySelectorAll('.feedback-btn')[1] as HTMLElement;
-      fireEvent.click(dislikeBtn);
-      const closeBtn = container.querySelector('[data-testid="feedback-close"]') as HTMLElement;
-      fireEvent.click(closeBtn);
-      const modal = container.querySelector('[data-testid="feedback-modal"]');
-      expect(modal?.getAttribute('data-open')).toBe('false');
-    });
-
-    it('hides feedback column and modal in the self-hosted version', async () => {
-      mockCheckIsSelfHosted.mockResolvedValue(true);
-      mockGetMessages.mockResolvedValue(messagesData);
-      const { container } = render(() => <MessageLog />);
-      await vi.waitFor(() => {
-        expect(container.querySelector('.data-table')).not.toBeNull();
-      });
-      expect(container.querySelector('.feedback-btn')).toBeNull();
-      expect(container.querySelector('[data-testid="feedback-modal"]')).toBeNull();
-      mockCheckIsSelfHosted.mockResolvedValue(false);
-    });
-
-    it('reverts optimistic like on API error', async () => {
-      mockSetMessageFeedback.mockRejectedValue(new Error('fail'));
-      mockGetMessages.mockResolvedValue(messagesData);
-      const { container } = render(() => <MessageLog />);
-      await vi.waitFor(() => {
-        expect(container.querySelector('.feedback-btn')).not.toBeNull();
-      });
-      const likeBtn = container.querySelector('.feedback-btn') as HTMLElement;
-      fireEvent.click(likeBtn);
-      await vi.waitFor(() => {
-        expect(container.querySelector('.feedback-btn--active-like')).toBeNull();
-      });
-    });
-
-    it('reverts optimistic dislike on API error', async () => {
-      mockSetMessageFeedback.mockRejectedValue(new Error('fail'));
-      mockGetMessages.mockResolvedValue(messagesData);
-      const { container } = render(() => <MessageLog />);
-      await vi.waitFor(() => {
-        expect(container.querySelector('.feedback-btn')).not.toBeNull();
-      });
-      const dislikeBtn = container.querySelectorAll('.feedback-btn')[1] as HTMLElement;
-      fireEvent.click(dislikeBtn);
-      await vi.waitFor(() => {
-        expect(container.querySelector('.feedback-btn--active-dislike')).toBeNull();
-      });
-    });
-
-    it('reverts optimistic clear on API error', async () => {
-      mockClearMessageFeedback.mockRejectedValue(new Error('fail'));
-      const dataWithFeedback = {
-        ...messagesData,
-        items: [{ ...messagesData.items[0], feedback_rating: 'like' }, messagesData.items[1]],
-      };
-      mockGetMessages.mockResolvedValue(dataWithFeedback);
-      const { container } = render(() => <MessageLog />);
-      await vi.waitFor(() => {
-        expect(container.querySelector('.feedback-btn--active-like')).not.toBeNull();
-      });
-      const likeBtn = container.querySelector('.feedback-btn--active-like') as HTMLElement;
-      fireEvent.click(likeBtn);
-      await vi.waitFor(() => {
-        expect(container.querySelector('.feedback-btn--active-like')).not.toBeNull();
-      });
-    });
-  });
-
-  describe("Tier filter", () => {
-    it("renders a Tier select with Playground among the options", async () => {
+  describe('Tier filter', () => {
+    it('renders a Tier select with Playground among the options', async () => {
       mockGetMessages.mockResolvedValue(messagesData);
       const { container } = render(() => <MessageLog />);
       await vi.waitFor(() => {
         const selects = container.querySelectorAll('[data-testid="select"]');
         expect(selects.length).toBeGreaterThanOrEqual(2);
       });
-      const selects = container.querySelectorAll('[data-testid="select"]');
-      // Second Select is the tier filter (first is providers).
-      const tierSelect = selects[1] as HTMLSelectElement;
+      const tierSelect = selectWithOption(container, 'All tiers');
       expect(tierSelect.textContent).toContain('All tiers');
       expect(tierSelect.textContent).toContain('Playground');
       expect(tierSelect.textContent).toContain('Simple');
@@ -1282,16 +1402,12 @@ describe('MessageLog', () => {
 
       const { container } = render(() => <MessageLog />);
       await vi.waitFor(() => {
-        const tierSelect = container.querySelectorAll(
-          '[data-testid="select"]',
-        )[1] as HTMLSelectElement;
+        const tierSelect = selectWithOption(container, 'All tiers');
         expect(tierSelect.textContent).toContain('Coding');
         expect(tierSelect.textContent).toContain('Premium');
       });
 
-      const tierSelect = container.querySelectorAll(
-        '[data-testid="select"]',
-      )[1] as HTMLSelectElement;
+      const tierSelect = selectWithOption(container, 'All tiers');
       expect(tierSelect.textContent).not.toContain('Trading');
       expect(tierSelect.textContent).toContain('Legacy');
       expect(tierSelect.textContent).not.toContain('Task:');
@@ -1306,9 +1422,7 @@ describe('MessageLog', () => {
           2,
         );
       });
-      const tierSelect = container.querySelectorAll(
-        '[data-testid="select"]',
-      )[1] as HTMLSelectElement;
+      const tierSelect = selectWithOption(container, 'All tiers');
       mockGetMessages.mockClear();
       fireEvent.change(tierSelect, { target: { value: 'playground' } });
       await vi.waitFor(() => {
@@ -1329,9 +1443,7 @@ describe('MessageLog', () => {
         );
       });
 
-      const tierSelect = container.querySelectorAll(
-        '[data-testid="select"]',
-      )[1] as HTMLSelectElement;
+      const tierSelect = selectWithOption(container, 'All tiers');
       mockGetMessages.mockClear();
       fireEvent.change(tierSelect, { target: { value: 'specificity:coding' } });
 
@@ -1354,9 +1466,7 @@ describe('MessageLog', () => {
         );
       });
 
-      const tierSelect = container.querySelectorAll(
-        '[data-testid="select"]',
-      )[1] as HTMLSelectElement;
+      const tierSelect = selectWithOption(container, 'All tiers');
       mockGetMessages.mockClear();
       fireEvent.change(tierSelect, { target: { value: 'header:ht-premium' } });
 
@@ -1430,9 +1540,10 @@ describe('MessageLog', () => {
       const { container } = render(() => <MessageLog />);
       await vi.waitFor(() => {
         const selects = container.querySelectorAll('[data-testid="select"]');
-        // In agent mode, first select is provider filter (no "All harnesses" option)
+        // In agent mode, no harness select renders; the first Select is the
+        // recovery filter (connections stay a multiselect, rendered apart).
         expect(selects[0].textContent).not.toContain('All harnesses');
-        expect(selects[0].textContent).toContain('All providers');
+        expect(selects[0].textContent).toContain('All attempts');
       });
     });
 
@@ -1456,6 +1567,31 @@ describe('MessageLog', () => {
         const calls = mockGetMessages.mock.calls;
         const lastQ = calls[calls.length - 1]?.[0] ?? {};
         expect(lastQ.agent_name).toBe('agent-alpha');
+      });
+    });
+
+    it('loads custom tier options for the selected agent in global mode', async () => {
+      mockAgentName = '';
+      mockGetMessages.mockResolvedValue(messagesData);
+      mockListHeaderTiers.mockResolvedValue([{ id: 'ht-premium', name: 'Premium' }]);
+
+      const { container } = render(() => <MessageLog />);
+      await vi.waitFor(() => {
+        const agentSelect = container.querySelectorAll(
+          '[data-testid="select"]',
+        )[0] as HTMLSelectElement;
+        expect(agentSelect.textContent).toContain('agent-alpha');
+      });
+
+      const agentSelect = container.querySelectorAll(
+        '[data-testid="select"]',
+      )[0] as HTMLSelectElement;
+      fireEvent.change(agentSelect, { target: { value: 'agent-alpha' } });
+
+      await vi.waitFor(() => {
+        expect(mockListHeaderTiers).toHaveBeenCalledWith('agent-alpha');
+        const tierSelect = selectWithOption(container, 'All tiers');
+        expect(tierSelect.textContent).toContain('Premium');
       });
     });
 
@@ -1551,7 +1687,7 @@ describe('MessageLog', () => {
       )[0] as HTMLSelectElement;
       fireEvent.change(agentSelect, { target: { value: 'agent-alpha' } });
       await vi.waitFor(() => {
-        expect(container.textContent).toContain('No messages match your filters');
+        expect(container.textContent).toContain('No requests match your filters');
       });
     });
 
@@ -1577,7 +1713,7 @@ describe('MessageLog', () => {
       )[0] as HTMLSelectElement;
       fireEvent.change(agentSelect, { target: { value: 'agent-alpha' } });
       await vi.waitFor(() => {
-        expect(container.textContent).toContain('No messages match your filters');
+        expect(container.textContent).toContain('No requests match your filters');
       });
       // Clear filters — restores data
       mockGetMessages.mockResolvedValue(messagesData);
@@ -1717,12 +1853,12 @@ describe('MessageLog', () => {
   });
 
   describe('global mode title and CTA (Bug 2 + Bug 3)', () => {
-    it("renders 'Messages - Manifest' title without agent prefix in global mode", () => {
+    it("renders 'Requests - Manifest' title without agent prefix in global mode", () => {
       mockAgentName = '';
       mockGetMessages.mockResolvedValue(messagesData);
       const { container } = render(() => <MessageLog />);
       const title = container.querySelector('title');
-      expect(title?.textContent).toBe('Messages - Manifest');
+      expect(title?.textContent).toBe('Requests - Manifest');
     });
 
     it('renders agent-scoped title in agent mode', () => {
@@ -1731,7 +1867,7 @@ describe('MessageLog', () => {
       const { container } = render(() => <MessageLog />);
       const title = container.querySelector('title');
       expect(title?.textContent).toContain('test-agent');
-      expect(title?.textContent).toContain('Messages - Manifest');
+      expect(title?.textContent).toContain('Requests - Manifest');
     });
 
     it("does not render 'undefined' in the title in global mode", () => {
@@ -1767,7 +1903,7 @@ describe('MessageLog', () => {
       });
       const { container } = render(() => <MessageLog />);
       await vi.waitFor(() => {
-        expect(container.textContent).toContain('No messages yet');
+        expect(container.textContent).toContain('No requests yet');
         // Global empty state guides to /harnesses, not set-up-agent modal
         const link = container.querySelector('a[href="/harnesses"]') as HTMLAnchorElement;
         expect(link).not.toBeNull();
@@ -1787,7 +1923,7 @@ describe('MessageLog', () => {
       });
       const { container } = render(() => <MessageLog />);
       await vi.waitFor(() => {
-        expect(container.textContent).toContain('No messages yet');
+        expect(container.textContent).toContain('No requests yet');
       });
       // Clicking the "Go to Harnesses" link should use the href attribute, not navigate()
       // Verify no button triggers mockNavigate with "/harnesses/undefined/routing"
@@ -1795,6 +1931,18 @@ describe('MessageLog', () => {
         expect.stringContaining('undefined'),
         expect.anything(),
       );
+    });
+  });
+
+  describe('drawer deep-link (?request=)', () => {
+    it('opens the side panel for the request named in the URL', async () => {
+      mockSearchParams = { request: 'msg-deeplink-1' };
+      render(() => <MessageLog />);
+      await vi.waitFor(() => {
+        const drawer = screen.getByTestId('request-drawer');
+        expect(drawer.getAttribute('data-message-id')).toBe('msg-deeplink-1');
+      });
+      mockSearchParams = {};
     });
   });
 });

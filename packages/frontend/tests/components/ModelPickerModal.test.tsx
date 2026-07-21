@@ -134,6 +134,8 @@ const subAndApi: RoutingProvider[] = [
     auth_type: 'subscription',
     is_active: true,
     has_api_key: false,
+    // Subscriptions carry no API key, so a usable one is proven by cached models.
+    cached_model_count: 3,
     connected_at: '2025-01-01',
   },
 ];
@@ -400,7 +402,7 @@ describe('ModelPickerModal', () => {
     ));
     expect(container.querySelector('.panel__tabs')).not.toBeNull();
     expect(container.textContent).toContain('Subscription');
-    expect(container.textContent).toContain('API Keys');
+    expect(container.textContent).toContain('Usage-based');
   });
 
   it('defaults to the subscription tab when subscription is connected', () => {
@@ -430,7 +432,7 @@ describe('ModelPickerModal', () => {
       />
     ));
     const apiTab = Array.from(container.querySelectorAll('[role="tab"]')).find((t) =>
-      t.textContent?.includes('API Keys'),
+      t.textContent?.includes('Usage-based'),
     ) as HTMLButtonElement;
     fireEvent.click(apiTab);
     expect(apiTab.getAttribute('aria-selected')).toBe('true');
@@ -696,6 +698,7 @@ describe('ModelPickerModal', () => {
         auth_type: 'local',
         is_active: true,
         has_api_key: false,
+        cached_model_count: 1,
         connected_at: '2025-01-01',
       },
     ];
@@ -721,7 +724,7 @@ describe('ModelPickerModal', () => {
     expect(container.textContent).toContain('Runs on your machine');
   });
 
-  it('renders the per-request cost instead of "Included in subscription" when present', () => {
+  it('renders the included per-request quota burn rate when present', () => {
     const gatewayProviders: RoutingProvider[] = [
       {
         id: 'p4',
@@ -729,6 +732,7 @@ describe('ModelPickerModal', () => {
         auth_type: 'subscription',
         is_active: true,
         has_api_key: false,
+        cached_model_count: 1,
         connected_at: '2025-01-01',
       },
     ];
@@ -752,8 +756,7 @@ describe('ModelPickerModal', () => {
         onClose={vi.fn()}
       />
     ));
-    expect(container.textContent).toContain('$0.0136/req');
-    expect(container.textContent).not.toContain('Included in subscription');
+    expect(container.textContent).toContain('Included ($0.0136 quota/req)');
   });
 
   it('filters the list by group name when search matches the group label', () => {
@@ -1012,6 +1015,7 @@ describe('ModelPickerModal', () => {
         auth_type: 'subscription',
         is_active: true,
         has_api_key: false,
+        cached_model_count: 1,
         connected_at: '2025-01-01',
       },
       {
@@ -1045,6 +1049,7 @@ describe('ModelPickerModal', () => {
         auth_type: 'local',
         is_active: true,
         has_api_key: false,
+        cached_model_count: 1,
         connected_at: '2025-01-01',
       },
     ];
@@ -1069,6 +1074,7 @@ describe('ModelPickerModal', () => {
         auth_type: 'subscription',
         is_active: true,
         has_api_key: false,
+        cached_model_count: 1,
         connected_at: '2025-01-01',
       },
       {
@@ -1092,7 +1098,7 @@ describe('ModelPickerModal', () => {
     ));
     // Switch to API Keys, toggle free-only on
     const apiTab = Array.from(container.querySelectorAll('[role="tab"]')).find((t) =>
-      t.textContent?.includes('API Keys'),
+      t.textContent?.includes('Usage-based'),
     ) as HTMLButtonElement;
     fireEvent.click(apiTab);
     const pill = container.querySelector('.routing-modal__cap-pill') as HTMLButtonElement;
@@ -1224,6 +1230,7 @@ describe('ModelPickerModal', () => {
         auth_type: 'local',
         is_active: true,
         has_api_key: false,
+        cached_model_count: 1,
         connected_at: '2025-01-01',
       },
     ];

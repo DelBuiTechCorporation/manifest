@@ -1,4 +1,5 @@
 import { Response as ExpressResponse } from 'express';
+import { TRANSPORT_NETWORK_HTTP_STATUS } from 'manifest-shared';
 import {
   createSsePayloadParser,
   DEFAULT_MAX_SSE_BUFFER_SIZE,
@@ -10,6 +11,26 @@ export interface StreamUsage {
   completion_tokens: number;
   cache_read_tokens?: number;
   cache_creation_tokens?: number;
+  reported_cost_usd?: number;
+}
+
+export class UpstreamStreamError extends Error {
+  readonly status = TRANSPORT_NETWORK_HTTP_STATUS;
+
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : 'Upstream stream interrupted', { cause });
+    this.name = 'UpstreamStreamError';
+  }
+}
+
+async function readUpstreamChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  try {
+    return await reader.read();
+  } catch (cause) {
+    throw new UpstreamStreamError(cause);
+  }
 }
 
 /**
@@ -17,15 +38,15 @@ export interface StreamUsage {
  * or Anthropic-native (`input_tokens`/`output_tokens`) shape and normalise it
  * to a `StreamUsage`. Returns null when neither shape is present.
  *
- * OpenAI-compatible providers expose cached prompt tokens under the nested
- * `prompt_tokens_details.cached_tokens` field, not the top-level
- * `cache_read_tokens` key — DeepSeek, Z.AI, MiniMax, Mistral, etc. all use the
- * nested form. Falling back to the nested key keeps the cache column populated
- * for those providers.
+ * OpenAI-compatible providers expose cached prompt tokens under provider-specific
+ * usage fields, not always the top-level `cache_read_tokens` key. Falling back
+ * to those keys keeps the cache column populated for providers such as DeepSeek,
+ * Z.AI, MiniMax, and Mistral.
  */
 export function parseUsageObject(usage: unknown): StreamUsage | null {
   if (!usage || typeof usage !== 'object') return null;
   const u = usage as Record<string, unknown>;
+  const reportedCostUsd = readReportedCostUsd(u);
 
   if (typeof u.prompt_tokens === 'number') {
     const promptDetails =
@@ -35,15 +56,20 @@ export function parseUsageObject(usage: unknown): StreamUsage | null {
     const cacheRead =
       typeof u.cache_read_tokens === 'number'
         ? u.cache_read_tokens
-        : typeof promptDetails?.cached_tokens === 'number'
-          ? promptDetails.cached_tokens
-          : undefined;
+        : typeof u.prompt_cache_hit_tokens === 'number'
+          ? u.prompt_cache_hit_tokens
+          : typeof u.cached_tokens === 'number'
+            ? u.cached_tokens
+            : typeof promptDetails?.cached_tokens === 'number'
+              ? promptDetails.cached_tokens
+              : undefined;
     return {
       prompt_tokens: u.prompt_tokens,
       completion_tokens: typeof u.completion_tokens === 'number' ? u.completion_tokens : 0,
       cache_read_tokens: cacheRead,
       cache_creation_tokens:
         typeof u.cache_creation_tokens === 'number' ? u.cache_creation_tokens : undefined,
+      ...(reportedCostUsd !== undefined ? { reported_cost_usd: reportedCostUsd } : {}),
     };
   }
 
@@ -78,10 +104,26 @@ export function parseUsageObject(usage: unknown): StreamUsage | null {
       completion_tokens: typeof u.output_tokens === 'number' ? u.output_tokens : 0,
       cache_read_tokens: isAnthropicNative ? nativeCacheRead : cacheRead || undefined,
       cache_creation_tokens: nativeCacheCreation,
+      ...(reportedCostUsd !== undefined ? { reported_cost_usd: reportedCostUsd } : {}),
     };
   }
 
   return null;
+}
+
+function readReportedCostUsd(usage: Record<string, unknown>): number | undefined {
+  const direct = readNonNegativeFiniteNumber(usage.cost);
+  if (direct !== undefined) return direct;
+
+  const details =
+    typeof usage.cost_details === 'object' && usage.cost_details !== null
+      ? (usage.cost_details as Record<string, unknown>)
+      : undefined;
+  return readNonNegativeFiniteNumber(details?.upstream_inference_cost);
+}
+
+function readNonNegativeFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 function extractUsageFromObject(obj: unknown): StreamUsage | null {
@@ -183,13 +225,14 @@ export async function pipePassthrough(
   const reader = source.getReader();
   const decoder = new TextDecoder();
   let capturedUsage: StreamUsage | null = null;
+  let upstreamStreamFailed = false;
   const parser = createSsePayloadParser({ maxBufferSize: MAX_SSE_BUFFER_SIZE });
 
   try {
     let done = false;
     while (!done) {
       if (dest.writableEnded) break;
-      const result = await reader.read();
+      const result = await readUpstreamChunk(reader);
       done = result.done;
       if (result.value) {
         // Write the upstream bytes through unchanged so the client sees
@@ -223,9 +266,12 @@ export async function pipePassthrough(
         if (usage) capturedUsage = usage;
       }
     }
+  } catch (error) {
+    upstreamStreamFailed = error instanceof UpstreamStreamError;
+    throw error;
   } finally {
-    if (!dest.writableEnded) dest.end();
     reader.releaseLock();
+    if (!upstreamStreamFailed && !dest.writableEnded) dest.end();
   }
 
   return capturedUsage;
@@ -241,6 +287,7 @@ export async function pipeStream(
   const reader = source.getReader();
   const decoder = new TextDecoder();
   let capturedUsage: StreamUsage | null = null;
+  let upstreamStreamFailed = false;
 
   const writeOut = (s: string): void => {
     dest.write(s);
@@ -292,7 +339,7 @@ export async function pipeStream(
     while (!done) {
       if (dest.writableEnded) break;
 
-      const result = await reader.read();
+      const result = await readUpstreamChunk(reader);
       done = result.done;
 
       if (result.value) {
@@ -320,9 +367,12 @@ export async function pipeStream(
         writeOut('data: [DONE]\n\n');
       }
     }
+  } catch (error) {
+    upstreamStreamFailed = error instanceof UpstreamStreamError;
+    throw error;
   } finally {
     reader.releaseLock();
-    if (!dest.writableEnded) dest.end();
+    if (!upstreamStreamFailed && !dest.writableEnded) dest.end();
   }
 
   return capturedUsage;

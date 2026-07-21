@@ -18,11 +18,10 @@ import { ProviderParamSpecService } from '../../routing-core/provider-param-spec
 /**
  * Status-code-driven fallback chain behavior for tryFallbacks().
  *
- * `shouldTriggerFallback(status)` currently returns true for ANY status >= 400,
- * so every upstream error (401 auth, 404 not-found, 429 rate limit, 5xx) keeps
- * the loop going to the next route. These tests pin that contract per status
- * code so a future change that re-introduces auth-failure short-circuit (or
- * any other selective stop) cannot land silently.
+ * `shouldTriggerFallback(status)` returns true for status-only errors >= 400,
+ * so upstream 401 auth, 404 not-found, 429 rate limit, and 5xx keep the loop
+ * going to the next route. Context overflow follows the same route policy so
+ * a later fallback with a larger context window can recover.
  */
 
 describe('ProxyFallbackService.tryFallbacks — failure chain by status code', () => {
@@ -215,7 +214,9 @@ describe('ProxyFallbackService.tryFallbacks — failure chain by status code', (
     const second = await service.tryForwardToProvider(opts);
 
     expect(first.response.status).toBe(429);
+    expect(first.providerCallStarted).toBe(true);
     expect(second.response.status).toBe(429);
+    expect(second.providerCallStarted).toBe(false);
     expect(second.response.headers.get('retry-after')).toBe('120');
     expect(await second.response.text()).toContain('temporarily cooling down');
     expect(providerClient.forward).toHaveBeenCalledTimes(1);
@@ -265,6 +266,78 @@ describe('ProxyFallbackService.tryFallbacks — failure chain by status code', (
     ).toBe(true);
   });
 
+  describe('rate-limit cooldown TTL derived from Retry-After', () => {
+    // Drive one real 429 carrying the given Retry-After header, then read the
+    // stored cooldown expiry so we can assert the TTL parseRetryAfterMs derived.
+    // A fresh service (beforeEach) means exactly one cooldown entry exists after
+    // the call. Returns the duration in ms measured from just before the call,
+    // so assertions allow small upper-bound slack for test runtime.
+    const recordCooldownTtl = async (retryAfter: string | null): Promise<number> => {
+      const headers: Record<string, string> = {};
+      if (retryAfter !== null) headers['retry-after'] = retryAfter;
+      providerClient.forward.mockResolvedValueOnce({
+        response: new Response('rate limit', { status: 429, headers }),
+        isGoogle: false,
+        isAnthropic: true,
+        isChatGpt: false,
+      });
+
+      const before = Date.now();
+      await service.tryForwardToProvider({
+        provider: 'anthropic',
+        apiKey: 'sk-ant-oat-token',
+        model: 'claude-sonnet-4-6',
+        body,
+        stream: false,
+        sessionKey: 'sess-1',
+        agentId: 'agent-1',
+        providerKeyLabel: 'Claude Code',
+        authType: 'subscription',
+      });
+
+      const cooldowns = (service as unknown as { rateLimitCooldowns: Map<string, number> })
+        .rateLimitCooldowns;
+      expect(cooldowns.size).toBe(1);
+      const [expiresAt] = [...cooldowns.values()];
+      return expiresAt - before;
+    };
+
+    it('uses the short 15s default when the 429 carries no Retry-After', async () => {
+      const ttl = await recordCooldownTtl(null);
+      expect(ttl).toBeGreaterThanOrEqual(15_000);
+      expect(ttl).toBeLessThan(16_000);
+    });
+
+    it('uses the short default when Retry-After is unparseable', async () => {
+      const ttl = await recordCooldownTtl('not-a-date');
+      expect(ttl).toBeGreaterThanOrEqual(15_000);
+      expect(ttl).toBeLessThan(16_000);
+    });
+
+    it('honors an HTTP-date Retry-After under a minute instead of flooring it to 60s', async () => {
+      // Before this fix the date form was floored to 60s; a ~10s instant now
+      // yields a ~10s cooldown, matching the numeric-seconds path.
+      const future = new Date(Date.now() + 10_000).toUTCString();
+      const ttl = await recordCooldownTtl(future);
+      expect(ttl).toBeGreaterThan(8_000);
+      expect(ttl).toBeLessThanOrEqual(10_000);
+    });
+
+    it('falls back to the short default when the Retry-After date is in the past', async () => {
+      const past = new Date(Date.now() - 5_000).toUTCString();
+      const ttl = await recordCooldownTtl(past);
+      expect(ttl).toBeGreaterThanOrEqual(15_000);
+      expect(ttl).toBeLessThan(16_000);
+    });
+
+    it('caps an HTTP-date Retry-After beyond the 5-minute ceiling', async () => {
+      const future = new Date(Date.now() + 30 * 60_000).toUTCString();
+      const ttl = await recordCooldownTtl(future);
+      expect(ttl).toBeGreaterThanOrEqual(5 * 60_000);
+      expect(ttl).toBeLessThan(5 * 60_000 + 1_000);
+    });
+  });
+
   it('does NOT short-circuit on 401 auth errors — continues to next route (current contract)', async () => {
     // shouldTriggerFallback(401) === true, so an auth failure on the first
     // route keeps the loop going. This test pins that behavior: if anyone
@@ -306,6 +379,48 @@ describe('ProxyFallbackService.tryFallbacks — failure chain by status code', (
     expect(result.failures).toHaveLength(2);
     expect(result.failures[0]).toMatchObject({ status: 401, provider: 'openai' });
     expect(result.failures[1]).toMatchObject({ status: 429, provider: 'anthropic' });
+  });
+
+  it('continues the fallback chain on a context length error body', async () => {
+    providerClient.forward
+      .mockResolvedValueOnce({
+        response: new Response(
+          JSON.stringify({
+            error: {
+              message:
+                "This model's maximum context length is 262144 tokens. However, your messages resulted in 334146 tokens.",
+              code: 'context_length_exceeded',
+            },
+          }),
+          { status: 400 },
+        ),
+        isGoogle: false,
+        isAnthropic: false,
+        isChatGpt: false,
+      })
+      .mockResolvedValueOnce({
+        response: new Response('{}', { status: 200 }),
+        isGoogle: true,
+        isAnthropic: false,
+        isChatGpt: false,
+      });
+
+    const routes: ModelRoute[] = [
+      route('openai', 'gpt-4o-mini'),
+      route('gemini', 'gemini-2.5-flash'),
+    ];
+    const result = await runFallbacks(['gpt-4o-mini', 'gemini-2.5-flash'], routes);
+
+    expect(providerClient.forward).toHaveBeenCalledTimes(2);
+    expect(result.success).not.toBeNull();
+    expect(result.success!.provider).toBe('gemini');
+    expect(result.success!.model).toBe('gemini-2.5-flash');
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toMatchObject({
+      status: 400,
+      provider: 'openai',
+      model: 'gpt-4o-mini',
+    });
   });
 
   it('returns success=null with all-404 failures when every fallback lacks the model (no 503 collapse)', async () => {

@@ -21,6 +21,7 @@ describe('ProviderModelFetcherService', () => {
       'openai-subscription',
       'azure',
       'bedrock',
+      'cerebras',
       'deepseek',
       'byteplus',
       'commandcode',
@@ -28,7 +29,10 @@ describe('ProviderModelFetcherService', () => {
       'groq',
       'kilo',
       'mistral',
+      'mistral-subscription',
       'moonshot',
+      'pioneer',
+      'nous',
       'nvidia',
       'xai',
       'minimax',
@@ -79,6 +83,243 @@ describe('ProviderModelFetcherService', () => {
       }),
     );
     expect(result.map((m) => m.id)).toEqual(['mistral.ministral-3-8b-instruct']);
+  });
+
+  it('should fetch Cerebras models from the OpenAI-compatible models endpoint', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [{ id: 'gpt-oss-120b' }, { id: 'zai-glm-4.7' }, { id: 'text-embedding-test' }],
+      }),
+    });
+
+    const result = await service.fetch('cerebras', 'cerebras-api-key');
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://api.cerebras.ai/v1/models',
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer cerebras-api-key' },
+      }),
+    );
+    expect(result.map((m) => m.id)).toEqual(['gpt-oss-120b', 'zai-glm-4.7']);
+    expect(result[0]).toMatchObject({
+      provider: 'cerebras',
+      contextWindow: 128000,
+      inputPricePerToken: null,
+      outputPricePerToken: null,
+    });
+  });
+
+  it('should fetch Pioneer models from the OpenAI-compatible models endpoint', async () => {
+    fetchSpy
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: [
+            { id: 'pioneer/auto', display_name: 'Pioneer Auto' },
+            {
+              id: 'claude-sonnet-4-6',
+              display_name: 'Claude Sonnet 4.6',
+              context_length: 1000000,
+            },
+            { id: 'fastino/gliner2-base-v1', display_name: 'GLiNER2 Base' },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          models: [
+            {
+              id: 'claude-sonnet-4-6',
+              label: 'Claude Sonnet 4.6',
+              context_window: 1000000,
+              input_price_per_million: 3,
+              output_price_per_million: 15,
+              supports_image_input: true,
+            },
+            {
+              id: 'fastino/gliner2-base-v1',
+              label: 'GLiNER2 Base',
+              input_price_per_million: 0.15,
+              output_price_per_million: 0.15,
+            },
+          ],
+        }),
+      });
+
+    const result = await service.fetch('pioneer', 'pio_sk_test_key');
+
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      1,
+      'https://api.pioneer.ai/v1/models',
+      expect.objectContaining({
+        headers: { 'X-API-Key': 'pio_sk_test_key' },
+      }),
+    );
+    expect(fetchSpy).toHaveBeenNthCalledWith(
+      2,
+      'https://api.pioneer.ai/base-models',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(result.map((m) => m.id)).toEqual(['pioneer/auto', 'claude-sonnet-4-6']);
+    expect(result[0]).toMatchObject({
+      provider: 'pioneer',
+      displayName: 'Pioneer Auto',
+      contextWindow: 128000,
+      inputPricePerToken: null,
+      outputPricePerToken: null,
+    });
+    expect(result[1]).toMatchObject({
+      displayName: 'Claude Sonnet 4.6',
+      contextWindow: 1000000,
+      inputPricePerToken: 3 / 1_000_000,
+      outputPricePerToken: 15 / 1_000_000,
+      inputModalities: ['text', 'image'],
+    });
+  });
+
+  it('should keep Pioneer model discovery when the pricing catalog is unavailable', async () => {
+    fetchSpy
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: [{ id: 'gpt-4o', display_name: 'GPT-4o' }],
+        }),
+      })
+      .mockResolvedValueOnce({ ok: false, status: 503 });
+
+    const result = await service.fetch('pioneer', 'pio_sk_test_key');
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: 'gpt-4o',
+      displayName: 'GPT-4o',
+      inputPricePerToken: null,
+      outputPricePerToken: null,
+    });
+  });
+
+  it('should keep Pioneer model discovery when the pricing catalog fetch fails', async () => {
+    fetchSpy
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: [{ id: 'gpt-4o', display_name: 'GPT-4o' }],
+        }),
+      })
+      .mockRejectedValueOnce(new Error('catalog down'));
+
+    const result = await service.fetch('pioneer', 'pio_sk_test_key');
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: 'gpt-4o',
+      displayName: 'GPT-4o',
+      inputPricePerToken: null,
+      outputPricePerToken: null,
+    });
+  });
+
+  it('should keep Pioneer model discovery when the pricing catalog is malformed', async () => {
+    fetchSpy
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: [{ id: 'gpt-4o' }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ models: 'not-array' }),
+      });
+
+    const result = await service.fetch('pioneer', 'pio_sk_test_key');
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: 'gpt-4o',
+      displayName: 'gpt-4o',
+      inputPricePerToken: null,
+      outputPricePerToken: null,
+    });
+  });
+
+  it('should ignore invalid Pioneer pricing rows and invalid prices', async () => {
+    fetchSpy
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          data: [
+            { id: 'bare-model' },
+            { id: 'invalid-prices', display_name: 'Invalid Prices', context_length: 64000 },
+            { id: 'label-fallback', display_name: 'Label Fallback', context_length: 32000 },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          models: [
+            { id: '' },
+            { id: 123 },
+            {
+              id: 'invalid-prices',
+              label: 'Invalid Prices',
+              input_price_per_million: -1,
+              output_price_per_million: Number.POSITIVE_INFINITY,
+              is_chat_model: false,
+            },
+            {
+              id: 'label-fallback',
+              label: '',
+              context_window: undefined,
+              input_price_per_million: null,
+              output_price_per_million: undefined,
+              supports_image_input: false,
+            },
+          ],
+        }),
+      });
+
+    const result = await service.fetch('pioneer', 'pio_sk_test_key');
+
+    expect(result.map((m) => m.id)).toEqual(['bare-model', 'invalid-prices', 'label-fallback']);
+    expect(result[0]).toMatchObject({
+      displayName: 'bare-model',
+      contextWindow: 128000,
+    });
+    expect(result[1]).toMatchObject({
+      displayName: 'Invalid Prices',
+      contextWindow: 64000,
+      inputPricePerToken: null,
+      outputPricePerToken: null,
+      capabilityCode: false,
+    });
+    expect(result[2]).toMatchObject({
+      displayName: 'Label Fallback',
+      contextWindow: 32000,
+      inputPricePerToken: null,
+      outputPricePerToken: null,
+    });
+    expect(result[2].inputModalities).toBeUndefined();
+  });
+
+  it('should return [] when Pioneer model discovery is unavailable', async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: false, status: 401 });
+
+    const result = await service.fetch('pioneer', 'pio_sk_test_key');
+
+    expect(result).toEqual([]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('should return [] when Pioneer model discovery throws', async () => {
+    fetchSpy.mockRejectedValueOnce(new Error('pioneer down'));
+
+    const result = await service.fetch('pioneer', 'pio_sk_test_key');
+
+    expect(result).toEqual([]);
   });
 
   /* ── Unknown provider ── */
@@ -219,6 +460,27 @@ describe('ProviderModelFetcherService', () => {
 
       const result = await service.fetch('openai', 'sk-test');
       expect(result.map((m) => m.id)).toEqual(['gpt-4o', 'gpt-4.1']);
+    });
+
+    it('should keep GPT-5.6 models returned by OpenAI', async () => {
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          data: [
+            { id: 'gpt-5.6-sol', object: 'model', created: 1782228018, owned_by: 'system' },
+            { id: 'gpt-5.6-terra', object: 'model', created: 1782228459, owned_by: 'system' },
+            { id: 'gpt-5.6-luna', object: 'model', created: 1782228658, owned_by: 'system' },
+          ],
+        }),
+      });
+
+      const result = await service.fetch('openai', 'sk-test');
+
+      expect(result.map((model) => model.id)).toEqual([
+        'gpt-5.6-sol',
+        'gpt-5.6-terra',
+        'gpt-5.6-luna',
+      ]);
     });
 
     it('should keep Responses-only chat models (Codex/-pro/o1-pro/deep-research) so the proxy can route them to /v1/responses', async () => {
@@ -622,6 +884,49 @@ describe('ProviderModelFetcherService', () => {
       // deprecated-model filtered by metadata, labs-experimental by regex, voxtral-mini-2602 by blocklist
       expect(result.map((m) => m.id)).toEqual(['mistral-large-latest']);
     });
+  });
+
+  /* ── Nous Portal subscription routing ── */
+
+  it('should fetch Nous Portal models from its OpenAI-compatible catalog', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          {
+            id: 'anthropic/claude-sonnet-4.5',
+            name: 'Anthropic: Claude Sonnet 4.5',
+            context_length: 200000,
+            architecture: { output_modalities: ['text'] },
+            pricing: { prompt: '0.000003', completion: '0.000015' },
+          },
+          {
+            id: 'google/gemini-3-pro-image',
+            name: 'Google: Gemini 3 Pro Image',
+            architecture: { output_modalities: ['image', 'text'] },
+          },
+        ],
+      }),
+    });
+
+    const result = await service.fetch('nous', 'nous-api-key', 'subscription');
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://inference-api.nousresearch.com/v1/models',
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer nous-api-key' },
+      }),
+    );
+    expect(result).toEqual([
+      expect.objectContaining({
+        id: 'anthropic/claude-sonnet-4.5',
+        displayName: 'Anthropic: Claude Sonnet 4.5',
+        provider: 'nous',
+        contextWindow: 200000,
+        inputPricePerToken: 0.000003,
+        outputPricePerToken: 0.000015,
+      }),
+    ]);
   });
 
   /* ── Z.ai subscription routing ── */
@@ -1237,6 +1542,27 @@ describe('ProviderModelFetcherService', () => {
     warnSpy.mockRestore();
   });
 
+  it('fetches Qwen models from an Alibaba Model Studio compatible-mode base URL', async () => {
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: [] }),
+    });
+
+    await service.fetch(
+      'qwen',
+      'sk-qwen',
+      'api_key',
+      'https://workspace-123.eu-central-1.maas.aliyuncs.com/compatible-mode/v1',
+    );
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'https://workspace-123.eu-central-1.maas.aliyuncs.com/compatible-mode/v1/models',
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer sk-qwen' },
+      }),
+    );
+  });
+
   /* ── Anthropic provider ── */
 
   describe('parseAnthropic (via anthropic provider)', () => {
@@ -1738,6 +2064,24 @@ describe('ProviderModelFetcherService', () => {
       expect(result[0].id).toBe('mistral');
     });
 
+    it('should preserve author-prefixed third-party model ids', async () => {
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          models: [
+            { name: 'mdq100/qwen3.5-flash:35b' },
+            { name: 'hf.co/acon96/Home-Llama-3.2-3B:F16' },
+          ],
+        }),
+      });
+
+      const result = await service.fetch('ollama', '');
+      expect(result.map((model) => model.id)).toEqual([
+        'mdq100/qwen3.5-flash:35b',
+        'hf.co/acon96/Home-Llama-3.2-3B:F16',
+      ]);
+    });
+
     it('should filter out entries without string name', async () => {
       fetchSpy.mockResolvedValue({
         ok: true,
@@ -2110,38 +2454,144 @@ describe('ProviderModelFetcherService', () => {
   });
 
   describe('opencode-go provider', () => {
-    it('delegates to the catalog service instead of hitting the network', async () => {
+    it('fetches the live OpenCode Go /models catalog and namespaces model ids', async () => {
       const catalog = {
-        list: jest.fn().mockResolvedValue([
-          { id: 'glm-5.1', displayName: 'GLM-5.1', format: 'openai' as const },
-          { id: 'minimax-m2.7', displayName: 'MiniMax M2.7', format: 'anthropic' as const },
-        ]),
+        list: jest.fn().mockResolvedValue([]),
+        refresh: jest
+          .fn()
+          .mockResolvedValue([
+            { id: 'glm-5.1', displayName: 'GLM-5.1', format: 'openai' as const },
+          ]),
       };
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          data: [
+            { id: 'glm-5.2', object: 'model', owned_by: 'opencode' },
+            { id: 'glm-5.1', object: 'model', owned_by: 'opencode' },
+          ],
+        }),
+      });
       const withCatalog = new ProviderModelFetcherService(
         catalog as unknown as ConstructorParameters<typeof ProviderModelFetcherService>[0],
       );
 
       const result = await withCatalog.fetch('opencode-go', 'og-token', 'subscription');
 
-      expect(fetchSpy).not.toHaveBeenCalled();
-      expect(catalog.list).toHaveBeenCalledTimes(1);
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://opencode.ai/zen/go/v1/models',
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: 'Bearer og-token' }),
+        }),
+      );
+      expect(catalog.list).not.toHaveBeenCalled();
+      expect(catalog.refresh).not.toHaveBeenCalled();
       expect(result).toHaveLength(2);
       expect(result[0]).toEqual(
         expect.objectContaining({
-          id: 'opencode-go/glm-5.1',
-          displayName: 'GLM-5.1',
+          id: 'opencode-go/glm-5.2',
+          displayName: 'opencode-go/glm-5.2',
           provider: 'opencode-go',
           inputPricePerToken: 0,
           outputPricePerToken: 0,
         }),
       );
-      expect(result[1].id).toBe('opencode-go/minimax-m2.7');
+      expect(result[1].id).toBe('opencode-go/glm-5.1');
     });
 
-    it('returns [] when no catalog service is wired up', async () => {
+    it('falls back to a refreshed docs catalog when live /models is empty', async () => {
+      const catalog = {
+        list: jest.fn().mockResolvedValue([]),
+        refresh: jest
+          .fn()
+          .mockResolvedValue([
+            { id: 'glm-5.2', displayName: 'GLM-5.2', format: 'openai' as const },
+          ]),
+      };
+      const withCatalog = new ProviderModelFetcherService(
+        catalog as unknown as ConstructorParameters<typeof ProviderModelFetcherService>[0],
+      );
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: [] }),
+      });
+
+      const result = await withCatalog.fetch('opencode-go', 'og-token', 'subscription', undefined, {
+        forceRefresh: true,
+      });
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://opencode.ai/zen/go/v1/models',
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: 'Bearer og-token' }),
+        }),
+      );
+      expect(catalog.refresh).toHaveBeenCalledTimes(1);
+      expect(catalog.list).not.toHaveBeenCalled();
+      expect(result[0]).toEqual(
+        expect.objectContaining({
+          id: 'opencode-go/glm-5.2',
+          displayName: 'GLM-5.2',
+          provider: 'opencode-go',
+        }),
+      );
+    });
+
+    it('falls back to the docs catalog when live /models returns an error', async () => {
+      const catalog = {
+        list: jest
+          .fn()
+          .mockResolvedValue([
+            { id: 'glm-5.1', displayName: 'GLM-5.1', format: 'openai' as const },
+          ]),
+        refresh: jest.fn().mockResolvedValue([]),
+      };
+      fetchSpy.mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: async () => ({}),
+      });
+      const withCatalog = new ProviderModelFetcherService(
+        catalog as unknown as ConstructorParameters<typeof ProviderModelFetcherService>[0],
+      );
+
+      const result = await withCatalog.fetch('opencode-go', 'og-token', 'subscription');
+
+      expect(catalog.list).toHaveBeenCalledTimes(1);
+      expect(catalog.refresh).not.toHaveBeenCalled();
+      expect(result.map((m) => m.id)).toEqual(['opencode-go/glm-5.1']);
+    });
+
+    it('falls back to the docs catalog when live /models throws', async () => {
+      const catalog = {
+        list: jest
+          .fn()
+          .mockResolvedValue([
+            { id: 'glm-5.1', displayName: 'GLM-5.1', format: 'openai' as const },
+          ]),
+        refresh: jest.fn().mockResolvedValue([]),
+      };
+      fetchSpy.mockRejectedValue(new Error('network down'));
+      const withCatalog = new ProviderModelFetcherService(
+        catalog as unknown as ConstructorParameters<typeof ProviderModelFetcherService>[0],
+      );
+
+      const result = await withCatalog.fetch('opencode-go', 'og-token', 'subscription');
+
+      expect(catalog.list).toHaveBeenCalledTimes(1);
+      expect(catalog.refresh).not.toHaveBeenCalled();
+      expect(result.map((m) => m.id)).toEqual(['opencode-go/glm-5.1']);
+    });
+
+    it('uses live models even when no docs catalog service is wired up', async () => {
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: [{ id: 'glm-5.2' }] }),
+      });
+
       const result = await service.fetch('opencode-go', 'og-token', 'subscription');
-      expect(result).toEqual([]);
-      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(result.map((m) => m.id)).toEqual(['opencode-go/glm-5.2']);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -2189,6 +2639,26 @@ describe('ProviderModelFetcherService', () => {
           capabilityCode: true,
         }),
       ]);
+    });
+  });
+
+  describe('cline-pass provider', () => {
+    it('returns known subscription models with configured context windows', async () => {
+      const result = await service.fetch('cline-pass', 'cp-token', 'subscription');
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(result).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'cline-pass/deepseek-v4-flash',
+            provider: 'cline-pass',
+            contextWindow: 200000,
+            capabilityReasoning: true,
+            capabilityCode: true,
+          }),
+        ]),
+      );
+      expect(result.every((model) => model.contextWindow === 200000)).toBe(true);
     });
   });
 
@@ -2379,6 +2849,31 @@ describe('ProviderModelFetcherService', () => {
       const result = await service.fetch('mistral', 'key');
       // Both pass: pixtral has no "mistral-ocr" prefix, "some-ocr-model" has "ocr" mid-name not prefix
       expect(result).toHaveLength(2);
+    });
+
+    it('filters the Vibe CLI model from API-key discovery and restricts subscription discovery to it', async () => {
+      fetchSpy.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          data: [{ id: 'mistral-vibe-cli-latest' }, { id: 'mistral-large-latest' }],
+        }),
+      });
+
+      const apiKeyResult = await service.fetch('mistral', 'mistral-api-key', 'api_key');
+      const subscriptionResult = await service.fetch('mistral', 'mistral-vibe-key', 'subscription');
+
+      expect(fetchSpy).toHaveBeenNthCalledWith(
+        1,
+        'https://api.mistral.ai/v1/models',
+        expect.objectContaining({ headers: { Authorization: 'Bearer mistral-api-key' } }),
+      );
+      expect(fetchSpy).toHaveBeenNthCalledWith(
+        2,
+        'https://api.mistral.ai/v1/models',
+        expect.objectContaining({ headers: { Authorization: 'Bearer mistral-vibe-key' } }),
+      );
+      expect(apiKeyResult.map((m) => m.id)).toEqual(['mistral-large-latest']);
+      expect(subscriptionResult.map((m) => m.id)).toEqual(['mistral-vibe-cli-latest']);
     });
   });
 

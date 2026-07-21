@@ -217,7 +217,15 @@ export class ResolveService {
     };
   }
 
-  private async resolveHeaderTier(
+  /**
+   * Public so the proxy can apply header tiers ahead of an explicit `model` in
+   * the request body: a header rule is a deliberate override the operator
+   * configured, and it outranks the model an SDK happens to name.
+   *
+   * Returns null when no rule matches, and when the matched rule has no
+   * available route — both mean "keep looking".
+   */
+  async resolveHeaderTier(
     agentId: string,
     tenantId: string,
     headers: IncomingHttpHeaders,
@@ -238,31 +246,54 @@ export class ResolveService {
     }
 
     // Guard against orphaned overrides (a model removed after the tier was
-    // configured). Mirrors the same check in resolveSpecificity().
-    if (!(await this.providerKeyService.isModelAvailable(tenantId, overrideRoute.model, agentId))) {
+    // configured). The route-aware check honors the override's pinned
+    // (provider, authType) so a model id shared by two connections — e.g.
+    // openai api_key + openai subscription both exposing gpt-5.5 — still
+    // counts as available (#2210).
+    const fallbackRoutes = readFallbackRoutes(match);
+    let primaryOverride: ModelRoute | null = overrideRoute;
+    let remainingFallbacks: ModelRoute[] | null = fallbackRoutes;
+    if (!(await this.providerKeyService.isRouteAvailable(tenantId, overrideRoute, agentId))) {
+      // An explicitly configured tier shouldn't die with its primary: promote
+      // the first available fallback instead of abandoning the whole tier.
       this.logger.warn(
         `Header tier "${match.name}" override ${overrideRoute.model} is unavailable ` +
-          `for agent=${agentId}; falling through to existing routing`,
+          `for agent=${agentId} — trying the tier's fallbacks`,
       );
-      return null;
+      primaryOverride = null;
+      const candidates = fallbackRoutes ?? [];
+      for (let i = 0; i < candidates.length; i++) {
+        if (await this.providerKeyService.isRouteAvailable(tenantId, candidates[i], agentId)) {
+          primaryOverride = candidates[i];
+          const rest = candidates.slice(i + 1);
+          remainingFallbacks = rest.length > 0 ? rest : null;
+          break;
+        }
+      }
+      if (!primaryOverride) {
+        this.logger.warn(
+          `Header tier "${match.name}" has no available route ` +
+            `for agent=${agentId}; falling through to existing routing`,
+        );
+        return null;
+      }
     }
 
     const provider =
-      overrideRoute.provider ||
-      (await this.resolveProviderForModel(agentId, tenantId, overrideRoute.model));
+      primaryOverride.provider ||
+      (await this.resolveProviderForModel(agentId, tenantId, primaryOverride.model));
     const authType: AuthType =
-      overrideRoute.authType ??
+      primaryOverride.authType ??
       (await this.providerKeyService.getAuthType(tenantId, provider ?? '', undefined, agentId));
     const baseRoute: ModelRoute | null =
       provider && authType
-        ? { provider, authType, model: overrideRoute.model, keyLabel: overrideRoute.keyLabel }
+        ? { provider, authType, model: primaryOverride.model, keyLabel: primaryOverride.keyLabel }
         : null;
     const route = baseRoute ? await this.enrichRouteKeyLabel(agentId, tenantId, baseRoute) : null;
 
     const outputModality = outputModalityFor(match);
     const responseMode = responseModeFor(match);
-    const fallbackRoutes = readFallbackRoutes(match);
-    const effectiveRoutes = effectiveRoutesForResponseMode(responseMode, route, fallbackRoutes);
+    const effectiveRoutes = effectiveRoutesForResponseMode(responseMode, route, remainingFallbacks);
 
     return {
       tier: 'standard',
@@ -322,10 +353,9 @@ export class ResolveService {
       // Validate the override still points to an available model. An orphaned
       // override (e.g. a deleted custom provider) returns null so resolve()
       // falls through to tier-based routing instead of pinning every matching
-      // request to a dead provider (#1603).
-      if (
-        !(await this.providerKeyService.isModelAvailable(tenantId, overrideRoute.model, agentId))
-      ) {
+      // request to a dead provider (#1603). Route-aware so a pinned
+      // (provider, authType) survives duplicate model ids (#2210).
+      if (!(await this.providerKeyService.isRouteAvailable(tenantId, overrideRoute, agentId))) {
         this.logger.warn(
           `Specificity override ${overrideRoute.model} is unavailable ` +
             `for agent=${agentId}; falling through to tier routing`,
@@ -361,10 +391,13 @@ export class ResolveService {
   }
 
   /**
-   * Build the resolved route chain for a tier assignment. Validates the
-   * override still points to an available model; when an override is orphaned,
-   * walk configured fallbacks before trying the auto-assigned route. Enriches
-   * routes with the default key label when no explicit pin is present.
+   * Build the resolved route chain for a tier assignment. Explicit overrides
+   * retain the full model-aware availability check. Automatic and fallback
+   * candidates use the provider-key cache instead: the proxy needs the same
+   * key before forwarding, so this prevents stale disconnected providers from
+   * becoming primary without adding a separate model-discovery query to the
+   * gateway path. When nothing has usable credentials, the proxy gets a null
+   * route and returns the neutral M101 instead of M100 (#2494).
    */
   private async buildResolvedRouteChain(
     agentId: string,
@@ -377,32 +410,35 @@ export class ResolveService {
     // honored when override is empty" semantics stay in lockstep with
     // TierService.hasRoutableTier / effectiveRoute (see route-helpers.ts).
     const autoAssigned = readAutoAssignedRoute(assignment);
+
+    if (override && (await this.providerKeyService.isRouteAvailable(tenantId, override, agentId))) {
+      return {
+        primaryRoute: await this.enrichRouteKeyLabel(agentId, tenantId, override),
+        fallbackRoutes,
+      };
+    }
     if (override) {
-      if (await this.providerKeyService.isModelAvailable(tenantId, override.model, agentId)) {
-        return {
-          primaryRoute: await this.enrichRouteKeyLabel(agentId, tenantId, override),
-          fallbackRoutes,
-        };
-      }
       this.logger.warn(
         `Override ${override.model} unavailable for agent=${agentId} — ` +
           `falling back to configured routes`,
       );
-      const candidates = [...(fallbackRoutes ?? []), ...(autoAssigned ? [autoAssigned] : [])];
-      const [primaryRoute, ...remainingFallbacks] = candidates;
-      return {
-        primaryRoute: primaryRoute
-          ? await this.enrichRouteKeyLabel(agentId, tenantId, primaryRoute)
-          : null,
-        fallbackRoutes: remainingFallbacks.length > 0 ? remainingFallbacks : null,
-      };
     }
-    return {
-      primaryRoute: autoAssigned
-        ? await this.enrichRouteKeyLabel(agentId, tenantId, autoAssigned)
-        : null,
-      fallbackRoutes,
-    };
+
+    // An orphaned override walks its fallbacks before the legacy auto-assigned
+    // route; a tier with no override starts from the auto-assigned route.
+    const candidates = override
+      ? [...(fallbackRoutes ?? []), ...(autoAssigned ? [autoAssigned] : [])]
+      : [...(autoAssigned ? [autoAssigned] : []), ...(fallbackRoutes ?? [])];
+    for (let i = 0; i < candidates.length; i++) {
+      if (await this.providerKeyService.hasRouteCredentials(tenantId, candidates[i], agentId)) {
+        const rest = candidates.slice(i + 1);
+        return {
+          primaryRoute: await this.enrichRouteKeyLabel(agentId, tenantId, candidates[i]),
+          fallbackRoutes: rest.length > 0 ? rest : null,
+        };
+      }
+    }
+    return { primaryRoute: null, fallbackRoutes: null };
   }
 
   /**

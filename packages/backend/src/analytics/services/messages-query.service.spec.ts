@@ -4,7 +4,8 @@ import { Brackets, In } from 'typeorm';
 import { MessagesQueryService } from './messages-query.service';
 import { AgentMessage } from '../../entities/agent-message.entity';
 import { CustomProvider } from '../../entities/custom-provider.entity';
-import type { MessageStatusFilter } from '../dto/messages-query.dto';
+import { MANIFEST_ORIGIN_PREDICATE } from './query-helpers';
+import type { MessageStatusFilter, MessageTriggerFilter } from '../dto/messages-query.dto';
 
 describe('MessagesQueryService', () => {
   let service: MessagesQueryService;
@@ -706,13 +707,18 @@ describe('MessagesQueryService', () => {
     expect(tierCall?.[1]).toEqual({ tierFilter: 'playground' });
   });
 
-  it.each<[MessageStatusFilter, string, Record<string, unknown>]>([
+  it.each<[MessageStatusFilter, string, Record<string, unknown> | undefined]>([
+    [
+      'failed',
+      'at.status IN (:...failedStatuses)',
+      { failedStatuses: ['error', 'fallback_error', 'rate_limited', 'auto_fixed', 'failed'] },
+    ],
     [
       'errors',
       'at.status IN (:...errorStatuses)',
-      { errorStatuses: ['error', 'fallback_error', 'rate_limited'] },
+      { errorStatuses: ['error', 'fallback_error', 'rate_limited', 'auto_fixed', 'failed'] },
     ],
-    ['ok', 'at.status = :statusFilter', { statusFilter: 'ok' }],
+    ['ok', "at.status IN ('ok', 'success')", undefined],
   ])('passes %s status filter through to the query builder', async (status, clause, bindings) => {
     mockGetRawOne.mockResolvedValueOnce({ total: 1 });
     mockGetRawMany
@@ -735,9 +741,145 @@ describe('MessagesQueryService', () => {
     });
 
     expect(result.total_count).toBe(1);
-    const statusCall = andWhereSpy.mock.calls.find(([candidate]) => candidate === clause);
+    const statusCall = andWhereSpy.mock.calls.find(
+      ([candidate]) => typeof candidate === 'string' && candidate.includes(clause),
+    );
     expect(statusCall).toBeDefined();
     expect(statusCall?.[1]).toEqual(bindings);
+  });
+
+  async function runWithTrigger(trigger: MessageTriggerFilter): Promise<jest.Mock> {
+    mockGetRawOne.mockResolvedValueOnce({ total: 1 });
+    mockGetRawMany.mockResolvedValueOnce([
+      { id: 'msg-1', timestamp: '2026-04-24 10:00:00', model: 'gpt-4o-mini', cost: 0 },
+    ]);
+    const mockQb = (
+      service as unknown as { turnRepo: { createQueryBuilder: jest.Mock } }
+    ).turnRepo.createQueryBuilder();
+    const andWhereSpy = mockQb.andWhere as jest.Mock;
+    andWhereSpy.mockClear();
+
+    await service.getMessages({
+      range: '24h',
+      tenantId: 'test-user',
+      limit: 20,
+      triggers: trigger ? [trigger] : undefined,
+      include_filter_options: false,
+    });
+
+    return andWhereSpy;
+  }
+
+  it('filters auto-fix trigger rows by retry role', async () => {
+    const andWhereSpy = await runWithTrigger('autofix');
+    const triggerCall = andWhereSpy.mock.calls.find(
+      ([clause]) => clause === 'at.autofix_role = :triggerAutofixRole',
+    );
+    expect(triggerCall).toBeDefined();
+    expect(triggerCall?.[1]).toEqual({ triggerAutofixRole: 'retry' });
+  });
+
+  it('filters fallback trigger rows while preserving auto-fix precedence', async () => {
+    const andWhereSpy = await runWithTrigger('fallback');
+    expect(
+      andWhereSpy.mock.calls.find(
+        ([clause]) =>
+          clause === '(at.autofix_role IS NULL OR at.autofix_role != :triggerAutofixRole)',
+      )?.[1],
+    ).toEqual({ triggerAutofixRole: 'retry' });
+    expect(
+      andWhereSpy.mock.calls.find(
+        ([clause]) =>
+          clause === "at.fallback_from_model IS NOT NULL AND at.fallback_from_model != ''",
+      ),
+    ).toBeDefined();
+  });
+
+  it('filters ordinary rows with no trigger badge', async () => {
+    const andWhereSpy = await runWithTrigger('none');
+    expect(
+      andWhereSpy.mock.calls.find(
+        ([clause]) =>
+          clause === '(at.autofix_role IS NULL OR at.autofix_role != :triggerAutofixRole)',
+      )?.[1],
+    ).toEqual({ triggerAutofixRole: 'retry' });
+    expect(
+      andWhereSpy.mock.calls.find(
+        ([clause]) => clause === "(at.fallback_from_model IS NULL OR at.fallback_from_model = '')",
+      ),
+    ).toBeDefined();
+  });
+
+  function runWithOrigin(params: {
+    origin?: 'manifest' | 'provider' | 'transport' | 'config' | 'policy' | 'internal' | 'request';
+    error_class?: string;
+  }): Promise<jest.Mock> {
+    mockGetRawOne.mockResolvedValueOnce({ total: 0 });
+    mockGetRawMany.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+    const mockQb = (
+      service as unknown as { turnRepo: { createQueryBuilder: jest.Mock } }
+    ).turnRepo.createQueryBuilder();
+    const andWhereSpy = mockQb.andWhere as jest.Mock;
+    andWhereSpy.mockClear();
+    return service
+      .getMessages({ range: '24h', tenantId: 'test-user', limit: 20, ...params })
+      .then(() => andWhereSpy);
+  }
+
+  it('hides no origin from the log by default — a setup error is a message', async () => {
+    const andWhereSpy = await runWithOrigin({});
+    // No origin predicate of any kind: the log is the complete event listing.
+    expect(
+      andWhereSpy.mock.calls.find(([clause]) => clause === MANIFEST_ORIGIN_PREDICATE),
+    ).toBeUndefined();
+    expect(
+      andWhereSpy.mock.calls.find(([clause]) => clause === 'at.error_origin = :originFilter'),
+    ).toBeUndefined();
+    expect(
+      andWhereSpy.mock.calls.find(
+        ([clause]) => typeof clause === 'string' && clause.includes('error_origin NOT IN'),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('shows only Manifest-originated errors when origin=manifest', async () => {
+    const andWhereSpy = await runWithOrigin({ origin: 'manifest' });
+    expect(
+      andWhereSpy.mock.calls.find(([clause]) => clause === MANIFEST_ORIGIN_PREDICATE),
+    ).toBeDefined();
+  });
+
+  it('filters to the request origin (caller sent a malformed body)', async () => {
+    const andWhereSpy = await runWithOrigin({ origin: 'request' });
+    const originCall = andWhereSpy.mock.calls.find(
+      ([clause]) => clause === 'at.error_origin = :originFilter',
+    );
+    expect(originCall?.[1]).toEqual({ originFilter: 'request' });
+  });
+
+  it('filters to a specific error_origin when one is requested', async () => {
+    const andWhereSpy = await runWithOrigin({ origin: 'provider' });
+    const originCall = andWhereSpy.mock.calls.find(
+      ([clause]) => clause === 'at.error_origin = :originFilter',
+    );
+    expect(originCall).toBeDefined();
+    expect(originCall?.[1]).toEqual({ originFilter: 'provider' });
+  });
+
+  it('filters by error_class when requested', async () => {
+    const andWhereSpy = await runWithOrigin({ error_class: 'rate_limit' });
+    const classCall = andWhereSpy.mock.calls.find(
+      ([clause]) => clause === 'at.error_class = :errorClassFilter',
+    );
+    expect(classCall).toBeDefined();
+    expect(classCall?.[1]).toEqual({ errorClassFilter: 'rate_limit' });
+  });
+
+  it('reaches config classes by error_class alone', async () => {
+    const andWhereSpy = await runWithOrigin({ error_class: 'no_provider_key' });
+    expect(
+      andWhereSpy.mock.calls.find(([clause]) => clause === 'at.error_class = :errorClassFilter'),
+    ).toBeDefined();
   });
 
   it('passes specificity_category filter through to the query builder', async () => {
@@ -849,6 +991,38 @@ describe('MessagesQueryService', () => {
       service_type: 'chat',
       cursor: '2026-02-16 10:00:00|msg-1',
     });
+    expect(result.total_count).toBe(5);
+    expect(mockGetRawOne).toHaveBeenCalledTimes(2);
+  });
+
+  it('different trigger filters produce different count cache keys', async () => {
+    mockGetRawOne.mockResolvedValueOnce({ total: 10 });
+    mockGetRawMany.mockResolvedValueOnce([
+      { id: 'msg-1', timestamp: '2026-02-16 10:00:00', model: 'gpt-4o' },
+    ]);
+
+    await service.getMessages({
+      range: '24h',
+      tenantId: 'test-user',
+      limit: 20,
+      triggers: ['fallback'],
+      include_filter_options: false,
+    });
+
+    mockGetRawOne.mockResolvedValueOnce({ total: 5 });
+    mockGetRawMany.mockResolvedValueOnce([
+      { id: 'msg-2', timestamp: '2026-02-16 11:00:00', model: 'gpt-4o' },
+    ]);
+
+    const result = await service.getMessages({
+      range: '24h',
+      tenantId: 'test-user',
+      limit: 20,
+      triggers: ['autofix'],
+      cursor: '2026-02-16 10:00:00|msg-1',
+      include_filter_options: false,
+    });
+
     expect(result.total_count).toBe(5);
     expect(mockGetRawOne).toHaveBeenCalledTimes(2);
   });

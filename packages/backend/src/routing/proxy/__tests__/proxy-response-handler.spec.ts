@@ -10,6 +10,7 @@ import { RoutingMeta } from '../proxy.service';
 import { FailedFallback } from '../proxy-fallback.service';
 import { IngestionContext } from '../../../otlp/interfaces/ingestion-context.interface';
 import { StreamUsage } from '../stream-writer';
+import type { AutofixRecord } from '../../autofix/autofix.types';
 
 const testCtx: IngestionContext = {
   tenantId: 'tenant-1',
@@ -54,6 +55,34 @@ function mockRecorder() {
     recordPrimaryFailure: jest.fn().mockResolvedValue(undefined),
     recordFallbackSuccess: jest.fn().mockResolvedValue(undefined),
     recordSuccessMessage: jest.fn().mockResolvedValue(undefined),
+    recordAutofixOriginal: jest.fn().mockResolvedValue(undefined),
+  };
+}
+
+function failedAutofixRetry(): AutofixRecord {
+  return {
+    groupId: 'grp-failed-retry',
+    outcome: 'exhausted',
+    original_http_status: 400,
+    chain: [
+      {
+        attempt: 0,
+        origin: 'original',
+        request: { max_tokens: 5 },
+        http_status: 400,
+        error: { message: 'Unknown parameter' },
+        issue_id: 'issue-1',
+        patch_id: 'patch-1',
+        heal_attempt_id: 'heal-1',
+      },
+      {
+        attempt: 1,
+        origin: 'autofix',
+        request: { max_output_tokens: 5 },
+        http_status: 422,
+        error: { message: 'Retry also failed' },
+      },
+    ],
   };
 }
 
@@ -138,7 +167,8 @@ describe('proxy-response-handler', () => {
         testCtx,
         500,
         'Internal Server Error',
-        {
+        expect.objectContaining({
+          requestId: expect.any(String),
           model: 'gpt-4o',
           provider: 'openai',
           tier: 'standard',
@@ -148,12 +178,19 @@ describe('proxy-response-handler', () => {
           authType: undefined,
           reason: 'auto',
           specificityCategory: undefined,
-        },
+        }),
       );
       expect(res.status).toHaveBeenCalledWith(500);
       expect(res.json).toHaveBeenCalledWith(
         expect.objectContaining({
-          error: expect.objectContaining({ type: 'upstream_error', status: 500 }),
+          error: expect.objectContaining({
+            type: 'server_error',
+            code: null,
+            status: 500,
+            source: 'provider',
+            provider: 'openai',
+            model: 'gpt-4o',
+          }),
         }),
       );
     });
@@ -180,6 +217,66 @@ describe('proxy-response-handler', () => {
         500,
         'oops',
         expect.objectContaining({ reason: 'header-match' }),
+      );
+    });
+
+    it('finishes a locally rejected Request without recording a Provider Attempt', async () => {
+      const { res } = mockResponse();
+      const recorder = mockRecorder();
+      const meta = makeMeta({ providerCallStarted: false });
+
+      await handleProviderError(
+        res as any,
+        testCtx,
+        meta,
+        buildMetaHeaders(meta),
+        429,
+        'route cooling down',
+        undefined,
+        recorder as any,
+      );
+
+      expect(recorder.recordProviderError).toHaveBeenCalledWith(
+        testCtx,
+        429,
+        'route cooling down',
+        expect.objectContaining({ skipAttempt: true }),
+      );
+    });
+
+    it('records the original and terminal retry when a patched request fails', async () => {
+      const { res } = mockResponse();
+      const recorder = mockRecorder();
+      const meta = makeMeta();
+      const autofix = failedAutofixRetry();
+
+      await handleProviderError(
+        res as any,
+        testCtx,
+        meta,
+        buildMetaHeaders(meta),
+        422,
+        'Retry also failed',
+        undefined,
+        recorder as any,
+        'trace-retry',
+        null,
+        { 'x-request': '1' },
+        autofix,
+      );
+
+      expect(recorder.recordAutofixOriginal).toHaveBeenCalledWith(
+        testCtx,
+        'gpt-4o',
+        'standard',
+        autofix,
+        expect.objectContaining({ traceId: 'trace-retry', provider: 'openai' }),
+      );
+      expect(recorder.recordProviderError).toHaveBeenCalledWith(
+        testCtx,
+        422,
+        'Retry also failed',
+        expect.objectContaining({ autofix }),
       );
     });
 
@@ -215,9 +312,111 @@ describe('proxy-response-handler', () => {
       expect(res.json).toHaveBeenCalledWith(
         expect.objectContaining({
           error: expect.objectContaining({
-            type: 'fallback_exhausted',
+            type: 'server_error',
+            code: 'fallback_exhausted',
+            source: 'manifest',
             primary_model: 'gpt-4o',
             attempted_fallbacks: [{ model: 'claude-3-haiku', provider: 'anthropic', status: 429 }],
+          }),
+        }),
+      );
+    });
+
+    it('keeps a no-patch audit unlinked when the fallback chain exhausted', async () => {
+      const { res } = mockResponse();
+      const recorder = mockRecorder();
+      const meta = makeMeta();
+      const metaHeaders = buildMetaHeaders(meta);
+      const failedFallbacks: FailedFallback[] = [
+        { model: 'claude', provider: 'anthropic', fallbackIndex: 0, status: 500, errorBody: 'x' },
+      ];
+      const autofix: AutofixRecord = {
+        groupId: 'grp-exh',
+        outcome: 'unfixable',
+        original_http_status: 400,
+        chain: [
+          {
+            attempt: 0,
+            origin: 'original',
+            request: {},
+            http_status: 400,
+            error: { message: 'x' },
+          },
+        ],
+      };
+
+      await handleProviderError(
+        res as any,
+        testCtx,
+        meta,
+        metaHeaders,
+        400,
+        'Bad Request',
+        failedFallbacks,
+        recorder as any,
+        undefined,
+        undefined,
+        undefined,
+        autofix,
+      );
+
+      expect(recorder.recordPrimaryFailure).toHaveBeenCalledWith(
+        testCtx,
+        expect.anything(),
+        'gpt-4o',
+        expect.any(String),
+        expect.any(String),
+        undefined,
+        expect.objectContaining({ autofix, httpStatus: 400 }),
+      );
+      expect(recorder.recordAutofixOriginal).not.toHaveBeenCalled();
+    });
+
+    it('preserves provider context overflow code when fallback chain is exhausted', async () => {
+      const { res } = mockResponse();
+      const recorder = mockRecorder();
+      const meta = makeMeta({ provider: 'opencode-go', model: 'opencode-go/kimi-k2.6' });
+      const metaHeaders = buildMetaHeaders(meta);
+      const message =
+        "This model's maximum context length is 262144 tokens. However, your messages resulted in 334146 tokens.";
+      const failedFallbacks: FailedFallback[] = [
+        {
+          model: 'claude-sonnet-4-6',
+          provider: 'anthropic',
+          fallbackIndex: 0,
+          status: 400,
+          errorBody: 'also too long',
+        },
+      ];
+
+      await handleProviderError(
+        res as any,
+        testCtx,
+        meta,
+        metaHeaders,
+        400,
+        JSON.stringify({
+          error: {
+            message,
+            type: 'invalid_request_error',
+            code: 'context_length_exceeded',
+          },
+        }),
+        failedFallbacks,
+        recorder as any,
+      );
+
+      expect(res.setHeader).toHaveBeenCalledWith('X-Manifest-Fallback-Exhausted', 'true');
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          error: expect.objectContaining({
+            message,
+            type: 'invalid_request_error',
+            code: 'context_length_exceeded',
+            source: 'provider',
+            attempted_fallbacks: [
+              { model: 'claude-sonnet-4-6', provider: 'anthropic', status: 400 },
+            ],
           }),
         }),
       );
@@ -329,6 +528,54 @@ describe('proxy-response-handler', () => {
         }
       }
     });
+
+    it('returns provider context overflow as an OpenAI-compatible error in production', async () => {
+      const originalEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+      try {
+        const { res } = mockResponse();
+        const recorder = mockRecorder();
+        const meta = makeMeta({ provider: 'opencode-go', model: 'opencode-go/kimi-k2.6' });
+        const message =
+          "This model's maximum context length is 262144 tokens. However, your messages resulted in 334146 tokens.";
+
+        await handleProviderError(
+          res as any,
+          testCtx,
+          meta,
+          buildMetaHeaders(meta),
+          400,
+          JSON.stringify({
+            error: {
+              message,
+              type: 'invalid_request_error',
+              code: 'context_length_exceeded',
+            },
+          }),
+          undefined,
+          recorder as any,
+        );
+
+        expect(res.status).toHaveBeenCalledWith(400);
+        expect(res.json).toHaveBeenCalledWith({
+          error: expect.objectContaining({
+            message,
+            type: 'invalid_request_error',
+            code: 'context_length_exceeded',
+            status: 400,
+            source: 'provider',
+            provider: 'opencode-go',
+            model: 'opencode-go/kimi-k2.6',
+          }),
+        });
+      } finally {
+        if (originalEnv === undefined) {
+          delete process.env.NODE_ENV;
+        } else {
+          process.env.NODE_ENV = originalEnv;
+        }
+      }
+    });
   });
 
   /* ── recordFallbackFailures ── */
@@ -370,6 +617,133 @@ describe('proxy-response-handler', () => {
       expect(recorder.recordFailedFallbacks).toHaveBeenCalled();
     });
 
+    it('numbers an Auto-fix retry before its fallback attempts', () => {
+      const recorder = mockRecorder();
+      const meta = makeMeta({ fallbackFromModel: 'gpt-4o' });
+      const failedFallbacks: FailedFallback[] = [
+        { model: 'claude', provider: 'anthropic', fallbackIndex: 0, status: 500, errorBody: '' },
+      ];
+      const autofix: AutofixRecord = {
+        groupId: 'grp-order',
+        outcome: 'exhausted',
+        original_http_status: 400,
+        chain: [
+          { attempt: 0, origin: 'original', request: {}, http_status: 400 },
+          { attempt: 1, origin: 'autofix', request: {}, http_status: 400 },
+        ],
+      };
+
+      recordFallbackFailures(testCtx, meta, failedFallbacks, recorder as any, null, null, autofix);
+
+      expect(recorder.recordPrimaryFailure).toHaveBeenCalledWith(
+        testCtx,
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        undefined,
+        expect.objectContaining({ attemptNumber: 2 }),
+      );
+      expect(recorder.recordFailedFallbacks).toHaveBeenCalledWith(
+        testCtx,
+        expect.anything(),
+        expect.anything(),
+        failedFallbacks,
+        expect.objectContaining({ firstAttemptNumber: 3 }),
+      );
+    });
+
+    it('passes a no-patch audit to the plain primary failure', () => {
+      const recorder = mockRecorder();
+      const meta = makeMeta({ fallbackFromModel: 'gpt-4o', primaryErrorStatus: 400 });
+      const autofix: AutofixRecord = {
+        groupId: 'grp-b',
+        outcome: 'unfixable',
+        original_http_status: 400,
+        chain: [
+          {
+            attempt: 0,
+            origin: 'original',
+            request: {},
+            http_status: 400,
+            error: { message: 'x' },
+          },
+        ],
+      };
+
+      recordFallbackFailures(testCtx, meta, undefined, recorder as any, null, null, autofix);
+
+      expect(recorder.recordPrimaryFailure).toHaveBeenCalledWith(
+        testCtx,
+        expect.anything(),
+        'gpt-4o',
+        expect.any(String),
+        expect.any(String),
+        undefined,
+        expect.objectContaining({ autofix }),
+      );
+      expect(recorder.recordAutofixOriginal).not.toHaveBeenCalled();
+    });
+
+    it('records the original and failed Auto-fix retry before a successful fallback', () => {
+      const recorder = mockRecorder();
+      const meta = makeMeta({
+        fallbackFromModel: 'gpt-4o',
+        primaryErrorBody: 'Retry also failed',
+        primaryErrorStatus: 422,
+        primaryProvider: 'openai',
+        primaryAuthType: 'api_key',
+        primaryTenantProviderId: 'primary-key',
+        provider: 'anthropic',
+        model: 'claude-sonnet',
+      });
+      const autofix = failedAutofixRetry();
+
+      recordFallbackFailures(testCtx, meta, undefined, recorder as any, null, null, autofix);
+
+      expect(recorder.recordAutofixOriginal).toHaveBeenCalledWith(
+        testCtx,
+        'gpt-4o',
+        'standard',
+        autofix,
+        expect.objectContaining({
+          provider: 'openai',
+          authType: 'api_key',
+          tenantProviderId: 'primary-key',
+        }),
+      );
+      expect(recorder.recordPrimaryFailure).toHaveBeenCalledWith(
+        testCtx,
+        expect.anything(),
+        'gpt-4o',
+        'Retry also failed',
+        expect.any(String),
+        'api_key',
+        expect.objectContaining({ autofix, httpStatus: 422 }),
+      );
+    });
+
+    it('does not attribute the Auto-fix original to the fallback provider', () => {
+      const recorder = mockRecorder();
+      const meta = makeMeta({
+        fallbackFromModel: 'gpt-4o',
+        primaryProvider: undefined,
+        provider: 'anthropic',
+        model: 'claude-sonnet',
+      });
+      const autofix = failedAutofixRetry();
+
+      recordFallbackFailures(testCtx, meta, undefined, recorder as any, null, null, autofix);
+
+      expect(recorder.recordAutofixOriginal).toHaveBeenCalledWith(
+        testCtx,
+        'gpt-4o',
+        'standard',
+        autofix,
+        expect.objectContaining({ provider: undefined }),
+      );
+    });
+
     it('should not record failed fallbacks when array is empty', () => {
       const recorder = mockRecorder();
       const meta = makeMeta({ fallbackFromModel: 'gpt-4o' });
@@ -401,7 +775,13 @@ describe('proxy-response-handler', () => {
         'Provider returned HTTP 503',
         expect.any(String),
         undefined,
-        { provider: 'anthropic', reason: 'auto', callerAttribution: undefined },
+        expect.objectContaining({
+          requestId: expect.any(String),
+          provider: 'anthropic',
+          reason: 'auto',
+          callerAttribution: undefined,
+          httpStatus: 503,
+        }),
       );
     });
 
@@ -421,7 +801,11 @@ describe('proxy-response-handler', () => {
         'Provider returned HTTP 500',
         expect.any(String),
         undefined,
-        { provider: 'anthropic', reason: 'auto', callerAttribution: undefined },
+        expect.objectContaining({
+          requestId: expect.any(String),
+          provider: 'anthropic',
+          reason: 'auto',
+        }),
       );
     });
 
@@ -459,7 +843,11 @@ describe('proxy-response-handler', () => {
         expect.any(String),
         expect.any(String),
         undefined,
-        { provider: undefined, reason: 'auto', callerAttribution: undefined },
+        expect.objectContaining({
+          requestId: expect.any(String),
+          provider: undefined,
+          reason: 'auto',
+        }),
       );
     });
   });
@@ -550,7 +938,11 @@ describe('proxy-response-handler', () => {
       const { res } = mockResponse();
       const forward = mockForward({ isAnthropic: true });
       const client = mockProviderClient();
-      const meta = makeMeta();
+      const meta = makeMeta({
+        provider: 'anthropic',
+        auth_type: 'subscription',
+        model: 'claude-sonnet-4-5-20250929',
+      });
       const thinkingCache = { store: jest.fn() };
       const sessionKey = 'sess-anthro-stream';
 
@@ -576,6 +968,11 @@ describe('proxy-response-handler', () => {
         'sess-anthro-stream',
         'toolu_stream',
         blocks,
+        {
+          provider: 'anthropic',
+          authType: 'subscription',
+          model: 'claude-sonnet-4-5-20250929',
+        },
       );
     });
 
@@ -835,7 +1232,7 @@ describe('proxy-response-handler', () => {
         res,
         undefined,
         undefined,
-        undefined,
+        expect.any(Function),
       );
     });
 
@@ -1001,6 +1398,33 @@ describe('proxy-response-handler', () => {
         undefined,
       );
     });
+
+    it('does not configure assistant-message reasoning cache callbacks for streams without tool calls', async () => {
+      const { res } = mockResponse();
+      const forward = mockForward();
+      const client = mockProviderClient();
+      const meta = makeMeta({ provider: 'deepseek', model: 'deepseek-chat' });
+      const reasoningCache = { store: jest.fn() };
+      const sessionKey = 'sess-reasoning-stream';
+      const transformer = jest.fn((chunk: string) => `data: ${chunk}\n\n`);
+      client.createReasoningContentStreamTransformer.mockReturnValue(transformer);
+
+      await handleStreamResponse(
+        res as any,
+        forward as any,
+        meta,
+        {},
+        client as any,
+        undefined,
+        sessionKey,
+        undefined,
+        'chat_completions',
+        reasoningCache as any,
+      );
+
+      expect(client.createReasoningContentStreamTransformer.mock.calls[0][2]).toBeUndefined();
+      expect(reasoningCache.store).not.toHaveBeenCalled();
+    });
   });
 
   /* ── handleNonStreamResponse ── */
@@ -1096,7 +1520,11 @@ describe('proxy-response-handler', () => {
         usage: { input_tokens: 50, output_tokens: 12, cache_read_input_tokens: 0 },
       };
       const forward = mockForward(body, { isAnthropic: true });
-      const meta = makeMeta();
+      const meta = makeMeta({
+        provider: 'anthropic',
+        auth_type: 'subscription',
+        model: 'claude-sonnet-4-5-20250929',
+      });
       const thinkingCache = { store: jest.fn() };
 
       const usage = await handleNonStreamResponse(
@@ -1137,7 +1565,11 @@ describe('proxy-response-handler', () => {
         usage: { input_tokens: 1, output_tokens: 1 },
       };
       const forward = mockForward(body, { isAnthropic: true });
-      const meta = makeMeta();
+      const meta = makeMeta({
+        provider: 'anthropic',
+        auth_type: 'subscription',
+        model: 'claude-sonnet-4-5-20250929',
+      });
       const thinkingCache = { store: jest.fn() };
 
       await handleNonStreamResponse(
@@ -1152,9 +1584,16 @@ describe('proxy-response-handler', () => {
         'messages',
       );
 
-      expect(thinkingCache.store).toHaveBeenCalledWith('sess-x', 'toolu_1', [
-        { type: 'thinking', thinking: 'searching...', signature: 'sig' },
-      ]);
+      expect(thinkingCache.store).toHaveBeenCalledWith(
+        'sess-x',
+        'toolu_1',
+        [{ type: 'thinking', thinking: 'searching...', signature: 'sig' }],
+        {
+          provider: 'anthropic',
+          authType: 'subscription',
+          model: 'claude-sonnet-4-5-20250929',
+        },
+      );
     });
 
     it('should convert Anthropic response', async () => {
@@ -1162,7 +1601,11 @@ describe('proxy-response-handler', () => {
       const client = mockProviderClient();
       client.convertAnthropicResponse.mockReturnValue({});
       const forward = mockForward({}, { isAnthropic: true });
-      const meta = makeMeta();
+      const meta = makeMeta({
+        provider: 'anthropic',
+        auth_type: 'subscription',
+        model: 'claude-sonnet-4-5-20250929',
+      });
 
       const usage = await handleNonStreamResponse(
         res as any,
@@ -1191,7 +1634,11 @@ describe('proxy-response-handler', () => {
       });
 
       const forward = mockForward({}, { isAnthropic: true });
-      const meta = makeMeta();
+      const meta = makeMeta({
+        provider: 'anthropic',
+        auth_type: 'subscription',
+        model: 'claude-sonnet-4-5-20250929',
+      });
 
       await handleNonStreamResponse(
         res as any,
@@ -1205,9 +1652,16 @@ describe('proxy-response-handler', () => {
       );
 
       expect(thinkingCache.store).toHaveBeenCalledTimes(1);
-      expect(thinkingCache.store).toHaveBeenCalledWith('sess-anthro', 'toolu_01', [
-        { type: 'thinking', thinking: 'reason', signature: 's' },
-      ]);
+      expect(thinkingCache.store).toHaveBeenCalledWith(
+        'sess-anthro',
+        'toolu_01',
+        [{ type: 'thinking', thinking: 'reason', signature: 's' }],
+        {
+          provider: 'anthropic',
+          authType: 'subscription',
+          model: 'claude-sonnet-4-5-20250929',
+        },
+      );
 
       // The internal side-channel is stripped before the body reaches the client.
       const sentBody = res.json.mock.calls[0][0];
@@ -1395,6 +1849,63 @@ describe('proxy-response-handler', () => {
       expect(forward.response.text).toHaveBeenCalled();
       expect(forward.response.json).not.toHaveBeenCalled();
       expect(res.json).toHaveBeenCalledWith(response);
+    });
+
+    it('unwraps Anthropic synthetic structured-output tool calls for Responses clients', async () => {
+      const { res } = mockResponse();
+      const client = mockProviderClient();
+      const schema = { type: 'object', properties: { title: { type: 'string' } } };
+      client.convertAnthropicResponse.mockReturnValue({
+        model: 'claude-sonnet-4',
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: 'toolu_1',
+                  type: 'function',
+                  function: { name: 'patient_summary', arguments: '{"title":"ok"}' },
+                },
+              ],
+            },
+          },
+        ],
+      });
+      const forward = mockForward({}, { isAnthropic: true }) as ReturnType<typeof mockForward> & {
+        structuredOutputToolName?: string;
+        responsesTextFormat?: Record<string, unknown>;
+      };
+      forward.structuredOutputToolName = 'patient_summary';
+      forward.responsesTextFormat = {
+        type: 'json_schema',
+        name: 'patient_summary',
+        schema,
+        strict: true,
+      };
+
+      await handleNonStreamResponse(
+        res as any,
+        forward as any,
+        makeMeta({ model: 'claude-sonnet-4' }),
+        {},
+        client as any,
+        undefined,
+        undefined,
+        undefined,
+        'responses',
+      );
+
+      const responseBody = res.json.mock.calls[0][0];
+      expect(responseBody.output).toEqual([
+        expect.objectContaining({
+          type: 'message',
+          content: [{ type: 'output_text', text: '{"title":"ok"}', annotations: [] }],
+        }),
+      ]);
+      expect(responseBody.text).toEqual({
+        format: { type: 'json_schema', name: 'patient_summary', schema, strict: true },
+      });
     });
 
     it('converts a chat_completions response into Anthropic Messages when apiMode=messages', async () => {
@@ -1595,6 +2106,43 @@ describe('proxy-response-handler', () => {
       expect(res.json).toHaveBeenCalledWith(body);
     });
 
+    it('does not cache reasoning_content from compatible non-stream assistant responses without tool calls', async () => {
+      const { res } = mockResponse();
+      const client = mockProviderClient();
+      const reasoningCache = { store: jest.fn() };
+      const sessionKey = 'sess-reasoning-json';
+      const body = {
+        id: 'chatcmpl-1',
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content: 'The answer is 42.',
+              reasoning_content: 'I checked the arithmetic.',
+            },
+          },
+        ],
+      };
+      const forward = mockForward(body);
+      const meta = makeMeta({ provider: 'deepseek', model: 'deepseek-chat' });
+
+      await handleNonStreamResponse(
+        res as any,
+        forward as any,
+        meta,
+        {},
+        client as any,
+        undefined,
+        sessionKey,
+        undefined,
+        'chat_completions',
+        reasoningCache as any,
+      );
+
+      expect(reasoningCache.store).not.toHaveBeenCalled();
+      expect(res.json).toHaveBeenCalledWith(body);
+    });
+
     it('does not cache reasoning_content from strict provider responses', async () => {
       const { res } = mockResponse();
       const client = mockProviderClient();
@@ -1645,18 +2193,31 @@ describe('proxy-response-handler', () => {
         recorder as any,
         'trace-1',
         'session-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'request-order',
+        4,
       );
 
-      expect(recorder.recordFallbackSuccess).toHaveBeenCalledWith(testCtx, 'gpt-4o', 'standard', {
-        traceId: 'trace-1',
-        provider: 'openai',
-        fallbackFromModel: 'gpt-4o',
-        fallbackIndex: 1,
-        timestamp: '2025-01-01T00:00:00Z',
-        authType: undefined,
-        reason: 'auto',
-        usage,
-      });
+      expect(recorder.recordFallbackSuccess).toHaveBeenCalledWith(
+        testCtx,
+        'gpt-4o',
+        'standard',
+        expect.objectContaining({
+          requestId: 'request-order',
+          attemptNumber: 4,
+          traceId: 'trace-1',
+          provider: 'openai',
+          fallbackFromModel: 'gpt-4o',
+          fallbackIndex: 1,
+          timestamp: '2025-01-01T00:00:00Z',
+          authType: undefined,
+          reason: 'auto',
+          usage,
+        }),
+      );
     });
 
     it('should record success message when no fallback and usage exists', () => {
@@ -1672,14 +2233,16 @@ describe('proxy-response-handler', () => {
         'standard',
         'auto',
         usage,
-        {
+        expect.objectContaining({
+          requestId: expect.any(String),
+          attemptNumber: 1,
           traceId: 'trace-1',
           provider: 'openai',
           authType: undefined,
           sessionKey: 'session-1',
           durationMs: expect.any(Number),
           specificityCategory: undefined,
-        },
+        }),
       );
     });
 
@@ -1752,16 +2315,22 @@ describe('proxy-response-handler', () => {
 
       recordSuccess(testCtx, meta, null, '2025-01-01T00:00:00Z', recorder as any);
 
-      expect(recorder.recordFallbackSuccess).toHaveBeenCalledWith(testCtx, 'gpt-4o', 'standard', {
-        traceId: undefined,
-        provider: 'openai',
-        fallbackFromModel: 'gpt-4o',
-        fallbackIndex: 0,
-        timestamp: '2025-01-01T00:00:00Z',
-        authType: undefined,
-        reason: 'auto',
-        usage: undefined,
-      });
+      expect(recorder.recordFallbackSuccess).toHaveBeenCalledWith(
+        testCtx,
+        'gpt-4o',
+        'standard',
+        expect.objectContaining({
+          requestId: expect.any(String),
+          traceId: undefined,
+          provider: 'openai',
+          fallbackFromModel: 'gpt-4o',
+          fallbackIndex: 0,
+          timestamp: '2025-01-01T00:00:00Z',
+          authType: undefined,
+          reason: 'auto',
+          usage: undefined,
+        }),
+      );
     });
 
     it('defaults fallbackIndex to 0 when meta does not set one', () => {
@@ -1795,6 +2364,168 @@ describe('proxy-response-handler', () => {
         usage,
         expect.objectContaining({ specificityCategory: 'coding' }),
       );
+    });
+
+    // A healed Auto-fix chain: the failed original attempt is recorded as its
+    // own auto_fixed row, linked to the successful-retry success row above.
+    const healedAutofix: AutofixRecord = {
+      groupId: 'grp-1',
+      outcome: 'healed',
+      original_http_status: 400,
+      chain: [
+        {
+          attempt: 0,
+          origin: 'original',
+          request: {},
+          http_status: 400,
+          error: { message: 'Unknown parameter' },
+        },
+        { attempt: 1, origin: 'autofix', request: {}, http_status: 200 },
+      ],
+    };
+
+    it('records the failed Auto-fix original(s) when the chain has a failed entry (healed)', () => {
+      const recorder = mockRecorder();
+      const meta = makeMeta();
+      const usage: StreamUsage = { prompt_tokens: 100, completion_tokens: 50 };
+
+      recordSuccess(
+        testCtx,
+        meta,
+        usage,
+        undefined,
+        recorder as any,
+        'trace-1',
+        'session-1',
+        undefined,
+        null,
+        undefined,
+        healedAutofix,
+      );
+
+      expect(recorder.recordAutofixOriginal).toHaveBeenCalledWith(
+        testCtx,
+        'gpt-4o',
+        'standard',
+        healedAutofix,
+        expect.objectContaining({ provider: 'openai', reason: 'auto', traceId: 'trace-1' }),
+      );
+    });
+
+    it('does NOT record a separate auto_fixed original when healed but a fallback took over', () => {
+      // Edge: heal succeeded (outcome 'healed') but a later stream fallback took
+      // the request, so meta.fallbackFromModel is set and meta.model is now the
+      // fallback route. A standalone auto_fixed row here would be mis-attributed
+      // under the fallback model — the fallback path already carries the stamp.
+      const recorder = mockRecorder();
+      const meta = makeMeta({ fallbackFromModel: 'claude-opus', fallbackIndex: 0 });
+
+      recordSuccess(
+        testCtx,
+        meta,
+        { prompt_tokens: 1, completion_tokens: 1 },
+        '2025-01-01T00:00:00Z',
+        recorder as any,
+        'trace-1',
+        'session-1',
+        undefined,
+        null,
+        undefined,
+        healedAutofix,
+      );
+
+      expect(recorder.recordFallbackSuccess).toHaveBeenCalled();
+      expect(recorder.recordAutofixOriginal).not.toHaveBeenCalled();
+    });
+
+    it('does NOT record a separate auto_fixed original when healing EXHAUSTED but a fallback then succeeded', () => {
+      // Fallback-success path: meta.fallbackFromModel is set (so the
+      // recordFallbackSuccess branch runs) and the Auto-fix chain carries a
+      // failed attempt — but healing did NOT heal. The failed primary is
+      // already recorded exactly once as the `fallback_error` row (stamped with
+      // the Auto-fix audit by recordFallbackFailures), so emitting an
+      // `auto_fixed` row here too would double-count it under the fallback model.
+      const recorder = mockRecorder();
+      const meta = makeMeta({ fallbackFromModel: 'claude-opus', fallbackIndex: 0 });
+      const exhaustedAutofix: AutofixRecord = {
+        groupId: 'grp-exhausted',
+        outcome: 'exhausted',
+        original_http_status: 400,
+        chain: [
+          {
+            attempt: 0,
+            origin: 'original',
+            request: {},
+            http_status: 400,
+            error: { message: 'x' },
+          },
+        ],
+      };
+
+      recordSuccess(
+        testCtx,
+        meta,
+        { prompt_tokens: 1, completion_tokens: 1 },
+        '2025-01-01T00:00:00Z',
+        recorder as any,
+        undefined,
+        undefined,
+        undefined,
+        null,
+        undefined,
+        exhaustedAutofix,
+      );
+
+      // The success itself came from the fallback model.
+      expect(recorder.recordFallbackSuccess).toHaveBeenCalled();
+      expect(recorder.recordSuccessMessage).not.toHaveBeenCalled();
+      // …and no duplicate auto_fixed row is written for the failed primary.
+      expect(recorder.recordAutofixOriginal).not.toHaveBeenCalled();
+    });
+
+    it('does not record Auto-fix originals when healing did not heal (outcome !== healed)', () => {
+      // An Auto-fix record that did not heal must not trigger
+      // recordAutofixOriginal — the guard is the presence of a real retry.
+      const recorder = mockRecorder();
+      const meta = makeMeta();
+      const emptyChainAutofix: AutofixRecord = {
+        groupId: 'grp-empty',
+        outcome: 'exhausted',
+        original_http_status: 400,
+        chain: [],
+      };
+
+      recordSuccess(
+        testCtx,
+        meta,
+        { prompt_tokens: 1, completion_tokens: 1 },
+        undefined,
+        recorder as any,
+        undefined,
+        undefined,
+        undefined,
+        null,
+        undefined,
+        emptyChainAutofix,
+      );
+
+      expect(recorder.recordAutofixOriginal).not.toHaveBeenCalled();
+    });
+
+    it('does not record Auto-fix originals when autofix is absent', () => {
+      // Guards the `autofix && …` short-circuit: no autofix record at all.
+      const recorder = mockRecorder();
+      const meta = makeMeta();
+
+      recordSuccess(
+        testCtx,
+        meta,
+        { prompt_tokens: 1, completion_tokens: 1 },
+        undefined,
+        recorder as any,
+      );
+
+      expect(recorder.recordAutofixOriginal).not.toHaveBeenCalled();
     });
   });
 

@@ -51,11 +51,12 @@ const makeRepo = (agents: AgentRow[] = ['agent-1']) => ({
   delete: jest.fn().mockResolvedValue(undefined),
   remove: jest.fn().mockResolvedValue(undefined),
   update: jest.fn().mockResolvedValue(undefined),
-  manager: { transaction: jest.fn() },
+  manager: { transaction: jest.fn(), getRepository: jest.fn() },
   createQueryBuilder: jest.fn().mockReturnValue(makeQueryBuilder(agents)),
 });
 
 describe('ProviderService — route-only cleanup paths', () => {
+  const previousMode = process.env['MANIFEST_MODE'];
   let providerRepo: ReturnType<typeof makeRepo>;
   let tierRepo: ReturnType<typeof makeRepo>;
   let specRepo: ReturnType<typeof makeRepo>;
@@ -70,6 +71,7 @@ describe('ProviderService — route-only cleanup paths', () => {
   let svc: ProviderService;
 
   beforeEach(() => {
+    process.env['MANIFEST_MODE'] = 'selfhosted';
     providerRepo = makeRepo();
     tierRepo = makeRepo();
     specRepo = makeRepo();
@@ -91,6 +93,11 @@ describe('ProviderService — route-only cleanup paths', () => {
       pricingCache as unknown as ModelPricingCacheService,
       routingCache as unknown as RoutingCacheService,
     );
+  });
+
+  afterAll(() => {
+    if (previousMode === undefined) delete process.env['MANIFEST_MODE'];
+    else process.env['MANIFEST_MODE'] = previousMode;
   });
 
   describe('removeProvider — route guards', () => {
@@ -586,6 +593,82 @@ describe('ProviderService — route-only cleanup paths', () => {
       expect(routingCache.invalidateAgent).toHaveBeenCalledWith('agent-1');
       expect(routingCache.invalidateTenant).toHaveBeenCalledWith('tenant-1');
     });
+
+    it('deletes exact usage history before hard-deleting an inactive labeled key', async () => {
+      const messageRepo = makeRepo();
+      const enabledRepo = makeRepo();
+      const messages = [
+        { id: 'target-1', tenant_id: 'tenant-1', tenant_provider_id: 'inactive-sub' },
+        { id: 'target-2', tenant_id: 'tenant-1', tenant_provider_id: 'inactive-sub' },
+        { id: 'other-tenant', tenant_id: 'tenant-2', tenant_provider_id: 'inactive-sub' },
+        { id: 'other-key', tenant_id: 'tenant-1', tenant_provider_id: 'active-sub' },
+        { id: 'legacy-null', tenant_id: 'tenant-1', tenant_provider_id: null },
+      ];
+      const target = {
+        id: 'inactive-sub',
+        agent_id: null,
+        provider: 'anthropic',
+        auth_type: 'subscription',
+        label: 'Old Claude',
+        priority: 0,
+        is_active: false,
+      } as unknown as TenantProvider;
+      providerRepo.find.mockImplementation(async (options?: { order?: unknown }) =>
+        options?.order ? [] : [target],
+      );
+      messageRepo.delete.mockImplementation(async ({ tenant_id, tenant_provider_id }) => {
+        const before = messages.length;
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+          const message = messages[index];
+          if (
+            message.tenant_id === tenant_id &&
+            message.tenant_provider_id === tenant_provider_id
+          ) {
+            messages.splice(index, 1);
+          }
+        }
+        return { affected: before - messages.length, raw: [] };
+      });
+      providerRepo.manager.getRepository.mockReturnValue(messageRepo);
+      tierRepo.find.mockResolvedValue([]);
+      specRepo.find.mockResolvedValue([]);
+      headerTierRepo.find.mockResolvedValue([]);
+      const localSvc = new ProviderService(
+        providerRepo as unknown as Repository<TenantProvider>,
+        tierRepo as unknown as Repository<TierAssignment>,
+        specRepo as unknown as Repository<SpecificityAssignment>,
+        makeRepo() as unknown as Repository<Agent>,
+        headerTierRepo as unknown as Repository<HeaderTier>,
+        pricingCache as unknown as ModelPricingCacheService,
+        routingCache as unknown as RoutingCacheService,
+        enabledRepo as unknown as Repository<AgentEnabledProvider>,
+      );
+
+      await expect(
+        localSvc.removeProvider('agent-1', 'tenant-1', 'anthropic', 'subscription', 'Old Claude'),
+      ).resolves.toEqual({ notifications: [] });
+
+      expect(messageRepo.delete).toHaveBeenCalledWith({
+        tenant_id: 'tenant-1',
+        tenant_provider_id: 'inactive-sub',
+      });
+      expect(messages).toEqual([
+        { id: 'other-tenant', tenant_id: 'tenant-2', tenant_provider_id: 'inactive-sub' },
+        { id: 'other-key', tenant_id: 'tenant-1', tenant_provider_id: 'active-sub' },
+        { id: 'legacy-null', tenant_id: 'tenant-1', tenant_provider_id: null },
+      ]);
+      expect(messageRepo.delete.mock.invocationCallOrder[0]).toBeLessThan(
+        providerRepo.remove.mock.invocationCallOrder[0],
+      );
+      expect(providerRepo.remove).toHaveBeenCalledWith(target);
+      expect(enabledRepo.delete).toHaveBeenCalledWith({
+        tenant_provider_id: In(['inactive-sub']),
+      });
+      expect(providerRepo.save).not.toHaveBeenCalled();
+      expect(providerRepo.findOne).not.toHaveBeenCalled();
+      expect(routingCache.invalidateAgent).toHaveBeenCalledWith('agent-1');
+      expect(routingCache.invalidateTenant).toHaveBeenCalledWith('tenant-1');
+    });
   });
 
   describe('deactivateAllProviders', () => {
@@ -989,6 +1072,19 @@ describe('ProviderService — route-only cleanup paths', () => {
       const result = await svc.getProviders('tenant-1');
       expect(result).toBe(cached);
       expect(providerRepo.find).not.toHaveBeenCalled();
+    });
+
+    it('filters legacy built-in local providers from cloud routing', async () => {
+      process.env['MANIFEST_MODE'] = 'cloud';
+      providerRepo.find.mockResolvedValue([
+        { id: 'p1', provider: 'ollama', auth_type: 'local', is_active: true },
+        { id: 'p2', provider: 'custom:runtime-id', auth_type: 'local', is_active: true },
+      ]);
+
+      const result = await svc.getProviders('tenant-1');
+
+      expect(result.map((provider) => provider.provider)).toEqual(['custom:runtime-id']);
+      expect(routingCache.setProviders).toHaveBeenCalledWith('tenant-1', result);
     });
   });
 

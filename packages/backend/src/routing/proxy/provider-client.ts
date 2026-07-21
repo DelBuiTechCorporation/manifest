@@ -1,4 +1,5 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { createHash } from 'crypto';
+import { HttpStatus, Injectable, Logger, Optional } from '@nestjs/common';
 import { OPENAI_RESPONSES_ONLY_RE, stripVendorPrefix } from '../../common/constants/openai-models';
 import { XAI_RESPONSES_ONLY_RE } from '../../common/constants/xai-models';
 import {
@@ -11,8 +12,9 @@ import {
 import { validatePublicUrl } from '../../common/utils/url-validation';
 import { isSelfHosted } from '../../common/utils/detect-self-hosted';
 import { resolveSubscriptionEndpointKey } from './provider-hooks';
-import { injectOpenRouterCacheControl } from './cache-injection';
+import { injectOpenAiMessageCacheControl, injectOpenRouterCacheControl } from './cache-injection';
 import {
+  applyAnthropicAutomaticCacheControl,
   applyAnthropicMessagesMutations,
   toGoogleRequest,
   toAnthropicRequest,
@@ -29,16 +31,29 @@ import {
   createAnthropicTransformer,
   createReasoningContentStreamTransformer as reasoningContentStreamTransformer,
 } from './provider-client-converters';
-import { ForwardOptions } from './proxy-types';
+import { ForwardOptions, ProxyApiMode, type ProviderAttemptRef } from './proxy-types';
 import { isObjectRecord } from './chatgpt-helpers';
 import { CodexSessionAffinity } from './codex-session-affinity';
 import { toNativeResponsesRequest } from './responses-adapter';
 import { forwardKiroChat } from './kiro-adapter';
 import { OpencodeGoCatalogService } from '../../model-discovery/opencode-go-catalog.service';
 import { ProviderModelRegistryService } from '../../model-discovery/provider-model-registry.service';
+import { qualifyChatGptResponse } from './chatgpt-response-qualifier';
+import { isProviderAvailableForDeployment } from '../../common/utils/provider-availability';
+import { ManifestError } from '../../common/errors/manifest-error';
 
 export interface ForwardResult {
   response: Response;
+  /** Exact JSON body sent to the resolved provider transport. */
+  wireRequestBody?: Record<string, unknown>;
+  /** Provider-facing API shape of {@link wireRequestBody}. */
+  wireApiMode?: ProxyApiMode;
+  /** Re-send a healed wire body through the already-resolved transport. */
+  retryWireBody?: (body: Record<string, unknown>) => Promise<ForwardResult>;
+  /** False only when Manifest produced a response without invoking provider transport. */
+  providerCallStarted?: boolean;
+  /** Persisted provider-call identity, when request tracking is available. */
+  attempt?: ProviderAttemptRef;
   /** True when we converted from Google format (needs SSE transform). */
   isGoogle: boolean;
   /** True when we converted from Anthropic format (needs SSE transform). */
@@ -53,6 +68,24 @@ export interface ForwardResult {
    * passing the inner body to the standard Google converters.
    */
   isCodeAssist?: boolean;
+  /** Internal: Anthropic synthetic tool used to emulate Responses structured output. */
+  structuredOutputToolName?: string;
+  /** Internal: original Responses text.format metadata for synthesized Responses bodies. */
+  responsesTextFormat?: Record<string, unknown>;
+}
+
+function wireApiMode(endpoint: ProviderEndpoint): ProxyApiMode | undefined {
+  if (endpoint.format === 'openai') return 'chat_completions';
+  if (endpoint.format === 'anthropic') return 'messages';
+  if (endpoint.format === 'chatgpt') return 'responses';
+  return undefined;
+}
+
+interface BuiltProviderRequest {
+  url: string;
+  headers: Record<string, string>;
+  requestBody: Record<string, unknown>;
+  structuredOutputToolName?: string;
 }
 
 const parsedProviderTimeout = Number.parseInt(process.env.PROVIDER_TIMEOUT_MS ?? '', 10);
@@ -64,6 +97,88 @@ const QWEN_TOKEN_PLAN_RESPONSES_RE = /^qwen3\.7-max$/i;
 const COPILOT_CHAT_COMPLETIONS_ENDPOINT = '/chat/completions';
 const COPILOT_RESPONSES_ENDPOINTS = new Set(['/responses', 'ws:/responses']);
 
+function shouldApplyAnthropicAutomaticCacheControl(
+  endpointKey: string,
+  authType: string | undefined,
+): boolean {
+  return endpointKey === 'anthropic' && authType === 'subscription';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function responsesTextFormat(
+  body: Record<string, unknown>,
+  apiMode: ForwardOptions['apiMode'],
+): Record<string, unknown> | undefined {
+  if (apiMode !== 'responses' || !isRecord(body.text) || !isRecord(body.text.format)) {
+    return undefined;
+  }
+
+  const format = body.text.format;
+  if (format.type === 'json_object') return { type: 'json_object' };
+  if (format.type !== 'json_schema') return undefined;
+
+  const out: Record<string, unknown> = { type: 'json_schema' };
+  if (format.name !== undefined) out.name = format.name;
+  if (format.schema !== undefined) out.schema = format.schema;
+  if (format.strict !== undefined) out.strict = format.strict;
+  if (typeof format.description === 'string' && format.description) {
+    out.description = format.description;
+  }
+  return out;
+}
+
+function isStructuredResponseFormat(responseFormat: unknown): boolean {
+  return (
+    isRecord(responseFormat) &&
+    (responseFormat.type === 'json_object' || responseFormat.type === 'json_schema')
+  );
+}
+
+function structuredOutputToolName(
+  requestSource: Record<string, unknown>,
+  requestBody: Record<string, unknown>,
+): string | undefined {
+  if (!isStructuredResponseFormat(requestSource.response_format)) return undefined;
+  const toolChoice = requestBody.tool_choice;
+  if (!isRecord(toolChoice) || toolChoice.type !== 'tool') return undefined;
+  return typeof toolChoice.name === 'string' ? toolChoice.name : undefined;
+}
+
+function buildPromptCacheKey(sessionKey: string): string {
+  const digest = createHash('sha256').update(sessionKey).digest('hex').slice(0, 32);
+  return `manifest-${digest}`;
+}
+
+function applyXaiResponsesPromptCacheKey(
+  body: Record<string, unknown>,
+  sessionKey: string | undefined,
+): void {
+  if (typeof body.prompt_cache_key === 'string' && body.prompt_cache_key) return;
+  const trimmedSessionKey = sessionKey?.trim();
+  if (!trimmedSessionKey) return;
+  body.prompt_cache_key = trimmedSessionKey;
+}
+
+function applyHashedPromptCacheKey(
+  body: Record<string, unknown>,
+  sessionKey: string | undefined,
+): void {
+  if (typeof body.prompt_cache_key === 'string' && body.prompt_cache_key) return;
+  const trimmedSessionKey = sessionKey?.trim();
+  if (!trimmedSessionKey) return;
+  body.prompt_cache_key = buildPromptCacheKey(trimmedSessionKey);
+}
+
+function openRouterCacheMode(model: string): 'anthropic' | 'message' | null {
+  const normalized = model.toLowerCase().replace(/^~/, '');
+  if (normalized.startsWith('anthropic/')) return 'anthropic';
+  if (normalized.startsWith('google/') || normalized.startsWith('qwen/')) return 'message';
+  return null;
+}
+
 /**
  * Strip vendor prefix from model name (e.g. "anthropic/claude-sonnet-4" → "claude-sonnet-4").
  * Models synced from OpenRouter use vendor prefixes, but native APIs expect bare names.
@@ -74,16 +189,21 @@ function stripModelPrefix(model: string, endpointKey: string): string {
   if (endpointKey === 'commandcode' || endpointKey === 'commandcode-anthropic') {
     return model.startsWith('commandcode/') ? model.slice('commandcode/'.length) : model;
   }
-  // Custom providers, Fireworks, Groq, Kilo, and NVIDIA NIM: model IDs from these APIs contain
+  // Custom providers, Fireworks, Groq, Kilo, Nous, NVIDIA NIM, Ollama, Pioneer, and ClinePass: model IDs from these APIs contain
   // legitimate slash segments (e.g. "accounts/fireworks/models/deepseek-v3p1",
-  // "MiniMaxAI/MiniMax-2.7", "meta-llama/llama-guard-4-12b", "anthropic/claude-sonnet-4.5").
-  // Stripping would mangle the name the upstream API expects.
+  // "MiniMaxAI/MiniMax-2.7", "meta-llama/llama-guard-4-12b", "anthropic/claude-sonnet-4.5",
+  // "cline-pass/deepseek-v4-flash"). Stripping would mangle the name the upstream API expects.
   if (
     endpointKey === 'custom' ||
     endpointKey === 'fireworks' ||
     endpointKey === 'groq' ||
     endpointKey === 'kilo' ||
+    endpointKey === 'nous' ||
     endpointKey === 'nvidia' ||
+    endpointKey === 'cline-pass' ||
+    endpointKey === 'ollama' ||
+    endpointKey === 'ollama-cloud' ||
+    endpointKey === 'pioneer' ||
     endpointKey === 'azure' ||
     endpointKey === 'azure-openai-classic'
   )
@@ -127,6 +247,10 @@ export class ProviderClient {
       authType,
     } = opts;
 
+    if (!customEndpoint && !isProviderAvailableForDeployment(provider)) {
+      throw new ManifestError('M303', HttpStatus.BAD_REQUEST);
+    }
+
     const { endpoint: resolvedEndpoint, endpointKey } = await this.resolveEndpoint(
       customEndpoint,
       provider,
@@ -153,6 +277,8 @@ export class ProviderClient {
     const isResponses = opts.apiMode === 'responses' && endpoint.format === 'chatgpt';
     const isChatGpt = endpoint.format === 'chatgpt' && !isResponses;
     const isCodeAssist = !!endpoint.codeAssistEnvelope;
+    const textFormat = responsesTextFormat(body, opts.apiMode);
+    const resolvedWireApiMode = wireApiMode(endpoint);
 
     const bareModel = stripModelPrefix(model, endpointKey);
     if (endpoint.format === 'kiro') {
@@ -172,11 +298,13 @@ export class ProviderClient {
         isGoogle: false,
         isAnthropic: false,
         isChatGpt: false,
+        responsesTextFormat: textFormat,
       };
     }
-    const { url, headers, requestBody } = this.buildRequest({
+    const { url, headers, requestBody, structuredOutputToolName } = this.buildRequest({
       endpoint,
       endpointKey,
+      provider,
       bareModel,
       model,
       apiKey,
@@ -187,8 +315,10 @@ export class ProviderClient {
       stream,
       signatureLookup: opts.signatureLookup,
       thinkingLookup: opts.thinkingLookup,
+      thinkingRouteContext: opts.thinkingRouteContext,
       reasoningContentLookup: opts.reasoningContentLookup,
       providerResource: opts.providerResource,
+      sessionKey: opts.sessionKey,
     });
 
     // The Codex backend only serves prompt-cache hits with session affinity
@@ -202,30 +332,51 @@ export class ProviderClient {
     const finalHeaders =
       affinity || extraHeaders ? { ...headers, ...extraHeaders, ...affinity?.headers } : headers;
 
-    this.logger.debug(`Forwarding to ${endpointKey}: ${url.replace(/key=[^&]+/, 'key=***')}`);
+    const retryWireBody = async (
+      wireRequestBody: Record<string, unknown>,
+    ): Promise<ForwardResult> => {
+      this.logger.debug(`Forwarding to ${endpointKey}: ${url.replace(/key=[^&]+/, 'key=***')}`);
 
-    // SSRF defense in depth for user-supplied endpoint URLs (custom providers,
-    // subscription resource URLs). validatePublicUrl was called when the URL
-    // was stored, but DNS for the hostname may have rebound to a private or
-    // cloud-metadata address since then. Re-resolve and re-check now.
-    if (endpoint.requiresSsrfRevalidation) {
-      try {
-        await validatePublicUrl(url, { allowPrivate: isSelfHosted() });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Error(`Refusing to forward to disallowed URL: ${message}`);
+      // SSRF defense in depth for user-supplied endpoint URLs (custom providers,
+      // subscription resource URLs). Re-check every actual forward, including
+      // an immediate Auto-fix retry, because DNS may have rebound in between.
+      if (endpoint.requiresSsrfRevalidation) {
+        try {
+          await validatePublicUrl(url, { allowPrivate: isSelfHosted() });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          throw new Error(`Refusing to forward to disallowed URL: ${message}`);
+        }
       }
-    }
 
-    const result = await this.executeFetch(url, finalHeaders, requestBody, signal, stream, {
-      isGoogle,
-      isAnthropic,
-      isChatGpt,
-      isResponses,
-      isCodeAssist,
-    });
-    if (affinity) this.codexAffinity.capture(affinity.storeKey, result.response);
-    return result;
+      const result = await this.executeFetch(url, finalHeaders, wireRequestBody, signal, stream, {
+        isGoogle,
+        isAnthropic,
+        isChatGpt,
+        isResponses,
+        isCodeAssist,
+        structuredOutputToolName,
+        responsesTextFormat: textFormat,
+      });
+      const qualifiedResult =
+        endpointKey === 'openai-subscription'
+          ? {
+              ...result,
+              response: await qualifyChatGptResponse(result.response, {
+                downstreamFormat: isResponses ? 'responses' : 'chat-completions',
+              }),
+            }
+          : result;
+      if (affinity) this.codexAffinity.capture(affinity.storeKey, qualifiedResult.response);
+      return {
+        ...qualifiedResult,
+        wireRequestBody,
+        wireApiMode: resolvedWireApiMode,
+        retryWireBody,
+      };
+    };
+
+    return retryWireBody(requestBody);
   }
 
   /**
@@ -397,6 +548,7 @@ export class ProviderClient {
   private buildRequest(ctx: {
     endpoint: ProviderEndpoint;
     endpointKey: string;
+    provider: string;
     bareModel: string;
     model: string;
     apiKey: string;
@@ -407,9 +559,11 @@ export class ProviderClient {
     stream: boolean;
     signatureLookup?: ForwardOptions['signatureLookup'];
     thinkingLookup?: ForwardOptions['thinkingLookup'];
+    thinkingRouteContext?: ForwardOptions['thinkingRouteContext'];
     reasoningContentLookup?: ForwardOptions['reasoningContentLookup'];
     providerResource?: string;
-  }): { url: string; headers: Record<string, string>; requestBody: Record<string, unknown> } {
+    sessionKey?: string;
+  }): BuiltProviderRequest {
     const { endpoint, endpointKey, bareModel, apiKey, authType, body, chatBody, stream } = ctx;
     // For non-chat_completions inbound modes ('responses', 'messages'), the
     // routing layer pre-translated the request into chat_completions form
@@ -446,6 +600,11 @@ export class ProviderClient {
     if (endpoint.format === 'anthropic') {
       const injectSubscriptionIdentity =
         authType === 'subscription' && !endpoint.skipSubscriptionIdentity;
+      const thinkingRouteContext = ctx.thinkingRouteContext ?? {
+        provider: ctx.provider,
+        authType,
+        model: ctx.model,
+      };
       // When the inbound request is already Anthropic Messages
       // (`POST /v1/messages`) and the resolved upstream is also Anthropic,
       // skip the OpenAI translation round-trip and apply only the additive
@@ -460,18 +619,28 @@ export class ProviderClient {
           ? applyAnthropicMessagesMutations(body, {
               injectSubscriptionIdentity,
               thinkingLookup: ctx.thinkingLookup,
+              thinkingRouteContext,
               targetModel: bareModel,
             })
           : toAnthropicRequest(requestSource, bareModel, {
               injectSubscriptionIdentity,
               thinkingLookup: ctx.thinkingLookup,
+              thinkingRouteContext,
             });
+      const syntheticToolName =
+        ctx.apiMode === 'responses'
+          ? structuredOutputToolName(requestSource, requestBody)
+          : undefined;
       requestBody.model = bareModel;
       if (stream) requestBody.stream = true;
+      if (shouldApplyAnthropicAutomaticCacheControl(endpointKey, authType)) {
+        applyAnthropicAutomaticCacheControl(requestBody);
+      }
       return {
         url: `${endpoint.baseUrl}${endpoint.buildPath(bareModel)}`,
         headers: endpoint.buildHeaders(apiKey, authType),
         requestBody,
+        structuredOutputToolName: syntheticToolName,
       };
     }
 
@@ -507,11 +676,16 @@ export class ProviderClient {
                 responsesKey === 'copilot-responses' ||
                 responsesKey === 'xai-responses' ||
                 responsesKey === AZURE_OPENAI_RESPONSES_KEY,
-              // Only OpenAI's /responses endpoints are known to accept
-              // prompt_cache_key; other Responses-shaped backends may 400.
+              // OpenAI, Copilot, and xAI /responses endpoints accept prompt_cache_key.
+              // Other Responses-shaped backends may 400 on unknown params.
               forwardPromptCacheKey:
-                endpointKey === 'openai-subscription' || endpointKey === 'openai-responses',
+                endpointKey === 'openai-subscription' ||
+                endpointKey === 'openai-responses' ||
+                endpointKey === 'xai-responses',
             });
+      if (endpointKey === 'xai-responses') {
+        applyXaiResponsesPromptCacheKey(requestBody, ctx.sessionKey);
+      }
       // Force upstream streaming for copilot-responses so the SSE collector in
       // handleNonStreamResponse stays the single source of truth. Without this,
       // an explicit `stream: false` from the caller could hand us a plain JSON
@@ -544,8 +718,21 @@ export class ProviderClient {
       sanitized.stream_options = { ...existing, include_usage: true };
     }
     const requestBody = { ...sanitized, model: bareModel, stream };
-    if (endpointKey === 'openrouter' && ctx.model.startsWith('anthropic/')) {
-      injectOpenRouterCacheControl(requestBody);
+    if (endpointKey === 'mistral') {
+      applyHashedPromptCacheKey(requestBody, ctx.sessionKey);
+    }
+    if (endpointKey === 'moonshot') {
+      applyHashedPromptCacheKey(requestBody, ctx.sessionKey);
+    }
+    if (endpointKey === 'fireworks') {
+      applyHashedPromptCacheKey(requestBody, ctx.sessionKey);
+    }
+    if (endpointKey === 'qwen' || endpointKey === 'qwen-subscription') {
+      injectOpenAiMessageCacheControl(requestBody);
+    }
+    if (endpointKey === 'openrouter') {
+      const cacheMode = openRouterCacheMode(ctx.model);
+      if (cacheMode) injectOpenRouterCacheControl(requestBody, cacheMode);
     }
     return {
       url: `${endpoint.baseUrl}${endpoint.buildPath(bareModel)}`,
@@ -566,6 +753,8 @@ export class ProviderClient {
       isChatGpt: boolean;
       isResponses?: boolean;
       isCodeAssist?: boolean;
+      structuredOutputToolName?: string;
+      responsesTextFormat?: Record<string, unknown>;
     },
   ): Promise<ForwardResult> {
     let fetchSignal: AbortSignal;

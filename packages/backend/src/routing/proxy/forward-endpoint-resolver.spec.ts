@@ -23,7 +23,7 @@ describe('resolveForwardEndpoint', () => {
     expect(out.customEndpoint).toBeUndefined();
   });
 
-  it('builds the minimax region endpoint from a valid resource_url and strips the prefix', () => {
+  it('normalises a legacy MiniMax resource_url before building the region endpoint', () => {
     const out = resolveForwardEndpoint({
       provider: 'minimax',
       authType: 'subscription',
@@ -31,7 +31,7 @@ describe('resolveForwardEndpoint', () => {
       resourceUrl: 'https://api.minimaxi.com/anthropic',
     });
     expect(out.forwardModel).toBe('abab');
-    expect(out.customEndpoint?.baseUrl).toContain('api.minimaxi.com');
+    expect(out.customEndpoint?.baseUrl).toBe('https://api.minimaxi.com/anthropic/v1');
   });
 
   it('warns and builds no endpoint for an invalid minimax resource_url (still strips prefix)', () => {
@@ -144,6 +144,19 @@ describe('resolveForwardEndpoint', () => {
       providerRegion: 'beijing',
     });
     expect(out.customEndpoint).toBeDefined();
+  });
+
+  it('builds the qwen endpoint from a stored Alibaba Model Studio base URL', () => {
+    const out = resolveForwardEndpoint({
+      provider: 'qwen',
+      authType: 'api_key',
+      model: 'qwen-max',
+      providerRegion: 'https://workspace-123.eu-central-1.maas.aliyuncs.com/compatible-mode',
+    });
+    expect(out.forwardModel).toBe('qwen-max');
+    expect(out.customEndpoint?.baseUrl).toBe(
+      'https://workspace-123.eu-central-1.maas.aliyuncs.com/compatible-mode',
+    );
   });
 
   it('builds the AWS Bedrock Mantle endpoint for a selected region', () => {

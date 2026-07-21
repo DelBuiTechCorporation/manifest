@@ -80,7 +80,12 @@ describe('ResolveService — edge cases', () => {
   let providerKeyService: jest.Mocked<
     Pick<
       ProviderKeyService,
-      'isModelAvailable' | 'hasActiveProvider' | 'getAuthType' | 'getDefaultKeyLabel'
+      | 'isModelAvailable'
+      | 'isRouteAvailable'
+      | 'hasActiveProvider'
+      | 'getAuthType'
+      | 'getDefaultKeyLabel'
+      | 'hasRouteCredentials'
     >
   >;
   let specificityService: jest.Mocked<Pick<SpecificityService, 'getActiveAssignments'>>;
@@ -98,9 +103,11 @@ describe('ResolveService — edge cases', () => {
     tierService = { getTiers: jest.fn().mockResolvedValue([]) };
     providerKeyService = {
       isModelAvailable: jest.fn().mockResolvedValue(true),
+      isRouteAvailable: jest.fn().mockResolvedValue(true),
       hasActiveProvider: jest.fn().mockResolvedValue(true),
       getAuthType: jest.fn().mockResolvedValue('api_key'),
       getDefaultKeyLabel: jest.fn().mockResolvedValue(undefined),
+      hasRouteCredentials: jest.fn().mockResolvedValue(true),
     };
     specificityService = { getActiveAssignments: jest.fn().mockResolvedValue([]) };
     pricingCache = { getByModel: jest.fn().mockReturnValue(undefined) };
@@ -240,6 +247,7 @@ describe('ResolveService — edge cases', () => {
       specificityService.getActiveAssignments.mockResolvedValue([codingSpecificity('orphaned')]);
       mockedScan.mockReturnValue({ category: 'coding', confidence: 0.9 } as never);
       providerKeyService.isModelAvailable.mockResolvedValue(false);
+      providerKeyService.isRouteAvailable.mockResolvedValue(false);
       tierService.getTiers.mockResolvedValue([fallbackTierAssignment()]);
 
       await svc.resolve('agent-1', 'user-1', messages);
@@ -257,6 +265,7 @@ describe('ResolveService — edge cases', () => {
         } as unknown as TierAssignment,
       ]);
       providerKeyService.isModelAvailable.mockResolvedValue(false);
+      providerKeyService.isRouteAvailable.mockResolvedValue(false);
 
       await svc.resolve('agent-1', 'user-1', messages);
 

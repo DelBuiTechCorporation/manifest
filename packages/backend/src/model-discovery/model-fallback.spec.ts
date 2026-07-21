@@ -308,6 +308,48 @@ describe('buildSubscriptionFallbackModels', () => {
     expect(ids.some((id) => id.includes('-fast'))).toBe(false);
   });
 
+  it('uses the Anthropic Opus 4.8 subscription context override', () => {
+    const cache = new Map([
+      [
+        'anthropic/claude-opus-4-8',
+        {
+          input: 0.015,
+          output: 0.075,
+          contextWindow: 200000,
+          displayName: 'Claude Opus 4.8',
+        },
+      ],
+    ]);
+
+    const model = buildSubscriptionFallbackModels(makePricingSync(cache), 'anthropic').find(
+      (m) => m.id === 'claude-opus-4-8',
+    );
+
+    expect(model).toBeDefined();
+    expect(model!.contextWindow).toBe(1000000);
+  });
+
+  it('applies Anthropic Opus 4.8 context override to dated variants', () => {
+    const cache = new Map([
+      [
+        'anthropic/claude-opus-4-8-20260929',
+        {
+          input: 0.015,
+          output: 0.075,
+          contextWindow: 200000,
+          displayName: 'Claude Opus 4.8',
+        },
+      ],
+    ]);
+
+    const model = buildSubscriptionFallbackModels(makePricingSync(cache), 'anthropic').find(
+      (m) => m.id === 'claude-opus-4-8-20260929',
+    );
+
+    expect(model).toBeDefined();
+    expect(model!.contextWindow).toBe(1000000);
+  });
+
   it('surfaces claude-fable-5 even when the pricing cache lacks it', () => {
     // claude-fable-5 is a valid Anthropic subscription model with no pricing
     // cache entry; the knownModels fallback must still offer it.
@@ -323,6 +365,31 @@ describe('buildSubscriptionFallbackModels', () => {
     // so we do not fabricate stale entries when the live catalog is unreachable.
     const result = buildSubscriptionFallbackModels(makePricingSync(new Map()), 'opencode-go');
     expect(result).toEqual([]);
+  });
+
+  it('surfaces the fixed Mistral Vibe model even when the pricing cache lacks it', () => {
+    const ids = buildSubscriptionFallbackModels(makePricingSync(new Map()), 'mistral').map(
+      (m) => m.id,
+    );
+
+    expect(ids).toEqual(['mistral-vibe-cli-latest']);
+  });
+
+  it('keeps Mistral Vibe fallback matching exact', () => {
+    const cache = new Map([
+      [
+        'mistralai/mistral-vibe-cli-latest',
+        { input: 0.000001, output: 0.000003, displayName: 'Mistral Vibe CLI' },
+      ],
+      [
+        'mistralai/mistral-vibe-cli-fast',
+        { input: 0.000001, output: 0.000003, displayName: 'Mistral Vibe CLI Fast' },
+      ],
+    ]);
+
+    const result = buildSubscriptionFallbackModels(makePricingSync(cache), 'mistral');
+    expect(result.map((m) => m.id)).toEqual(['mistral-vibe-cli-latest']);
+    expect(result[0].displayName).toBe('Mistral Vibe CLI');
   });
 
   describe('knownModelsMatch exact mode (gemini)', () => {
@@ -617,6 +684,26 @@ describe('buildModelsDevFallback', () => {
       getModelsForProvider: jest.fn().mockReturnValue([]),
     };
     expect(buildModelsDevFallback(mockSync, 'unknown')).toEqual([]);
+  });
+
+  it('should prefix model ids for gateway providers when requested', () => {
+    const mockSync = {
+      getModelsForProvider: jest.fn().mockReturnValue([
+        {
+          id: 'glm-5.2',
+          name: 'GLM-5.2',
+          inputPricePerToken: 0.0000014,
+          outputPricePerToken: 0.0000044,
+        },
+      ]),
+    };
+
+    const result = buildModelsDevFallback(mockSync, 'opencode-go', {
+      idPrefix: 'opencode-go',
+    });
+
+    expect(result[0].id).toBe('opencode-go/glm-5.2');
+    expect(result[0].provider).toBe('opencode-go');
   });
 
   it('should use default context window when not provided', () => {

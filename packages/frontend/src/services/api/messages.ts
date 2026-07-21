@@ -1,4 +1,25 @@
 import { fetchJson, fetchMutate } from './core.js';
+import type { AutofixStatus } from 'manifest-shared';
+
+/** A deterministic edit Phoenix applied to heal a request. */
+export interface AutofixOperation {
+  type: string;
+  from?: string;
+  to?: string;
+}
+
+export interface AutofixDecision {
+  status: string | null;
+  issueId: string | null;
+  patchId: string | null;
+  healAttemptId: string | null;
+  /** Phoenix's human-readable "why" for the fix (null for pre-explanation rows). */
+  explanation?: {
+    summary: string;
+    operations: Array<{ type: string; detail: string }>;
+    source: string;
+  } | null;
+}
 
 export interface MessageDetailResponse {
   message: {
@@ -7,7 +28,18 @@ export interface MessageDetailResponse {
     agent_name: string | null;
     model: string | null;
     status: string;
+    autofix_status: AutofixStatus | null;
     error_message: string | null;
+    /** Documented Manifest error code ('M100', 'M300', …). Null for provider failures. */
+    error_code: string | null;
+    /** WHO caused a failure: provider | transport | config | policy | internal | request. Null on success. */
+    error_origin: string | null;
+    /** WHAT kind of failure (rate_limit, auth, billing, no_provider_key, timeout, …). Null on success. */
+    error_class: string | null;
+    /** HTTP status code of the error response. Null on success. */
+    error_http_status: number | null;
+    /** True when this row is a recovered (retried / fell-back-away-from) attempt, not the outcome. */
+    superseded: boolean;
     description: string | null;
     service_type: string | null;
     input_tokens: number;
@@ -50,6 +82,36 @@ export interface MessageDetailResponse {
       appUrl?: string;
       categories?: string[];
     } | null;
+    autofix_applied: boolean;
+    autofix_role: string | null;
+    autofix_operations: AutofixOperation[] | null;
+    /** Phoenix's decision behind this provider attempt. */
+    autofix_decision: AutofixDecision | null;
+    /** The paired row (failed original ↔ successful retry), for the visual link. */
+    autofix_sibling: { id: string; role: string | null; status: string } | null;
+    attempts?: Array<{
+      id: string;
+      model: string | null;
+      provider: string | null;
+      status: string;
+      auth_type: string | null;
+      error_message: string | null;
+      error_origin: string | null;
+      error_class: string | null;
+      error_http_status: number | null;
+      duration_ms: number | null;
+      cost_usd: number | null;
+      input_tokens: number;
+      output_tokens: number;
+      fallback_from_model: string | null;
+      fallback_index: number | null;
+      request_headers: Record<string, string> | null;
+      request_params: Record<string, unknown> | null;
+      autofix_applied: boolean;
+      autofix_role: string | null;
+      autofix_operations: AutofixOperation[] | null;
+      autofix_decision: AutofixDecision | null;
+    }>;
   };
 }
 
@@ -57,12 +119,18 @@ export function getMessages(
   params: {
     range?: string;
     provider?: string;
+    /** Comma-separated tenant_providers ids (connection filter). */
+    connections?: string;
+    /** Comma-separated attempt-status facets: has_failed, has_succeeded. */
+    attempts?: string;
     service_type?: string;
     cursor?: string;
     limit?: string;
     agent_name?: string;
     cost_min?: string;
     cost_max?: string;
+    status?: string;
+    trigger?: string;
     routing_tier?: string;
     specificity_category?: string;
     header_tier_id?: string;

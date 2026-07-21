@@ -18,6 +18,7 @@ import { appConfig } from '../src/config/app.config';
 import { IS_PUBLIC_KEY } from '../src/common/decorators/public.decorator';
 import { hashKey, keyPrefix } from '../src/common/utils/hash.util';
 import { AgentMessage } from '../src/entities/agent-message.entity';
+import { ManifestRequest } from '../src/entities/request.entity';
 import { ApiKey } from '../src/entities/api-key.entity';
 import { Tenant } from '../src/entities/tenant.entity';
 import { Agent } from '../src/entities/agent.entity';
@@ -37,6 +38,8 @@ import { PlaygroundColumn } from '../src/entities/playground-column.entity';
 import { ReasoningContentCacheEntry } from '../src/entities/reasoning-content-cache-entry.entity';
 import { AgentEnabledProvider } from '../src/entities/agent-enabled-provider.entity';
 import { BackfillState } from '../src/entities/backfill-state.entity';
+import { PublicErrorPage } from '../src/entities/public-error-page.entity';
+import { WaitlistClaim } from '../src/entities/waitlist-claim.entity';
 import { HealthModule } from '../src/health/health.module';
 import { AnalyticsModule } from '../src/analytics/analytics.module';
 import { OtlpModule } from '../src/otlp/otlp.module';
@@ -48,6 +51,7 @@ import { PlaygroundModule } from '../src/playground/playground.module';
 import { CommonModule } from '../src/common/common.module';
 import { PublicStatsModule } from '../src/public-stats/public-stats.module';
 import { SetupModule } from '../src/setup/setup.module';
+import { WaitlistModule } from '../src/waitlist/waitlist.module';
 
 export const TEST_USER_ID = 'test-user-001';
 export const TEST_API_KEY = 'test-api-key-001';
@@ -57,6 +61,7 @@ export const TEST_OTLP_KEY = 'mnfst_test-otlp-key-001';
 
 const entities = [
   AgentMessage,
+  ManifestRequest,
   ApiKey,
   Tenant,
   Agent,
@@ -76,6 +81,8 @@ const entities = [
   ReasoningContentCacheEntry,
   AgentEnabledProvider,
   BackfillState,
+  PublicErrorPage,
+  WaitlistClaim,
 ];
 const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models';
 const OPENROUTER_MODELS_FIXTURE = {
@@ -222,6 +229,7 @@ export async function createTestApp(): Promise<INestApplication> {
         PlaygroundModule,
         PublicStatsModule,
         SetupModule,
+        WaitlistModule,
       ],
       providers: [{ provide: APP_GUARD, useClass: MockSessionGuard }],
     }).compile();
@@ -231,6 +239,9 @@ export async function createTestApp(): Promise<INestApplication> {
       new ValidationPipe({
         transform: true,
         whitelist: true,
+        // Mirror the global pipe in main.ts so E2E exercises the real
+        // strict-DTO behavior (unknown fields → 400, not silently stripped).
+        forbidNonWhitelisted: true,
       }),
     );
     await app.init();

@@ -5,7 +5,12 @@ import { resolveProviderMetadataIdentity, type AuthType } from 'manifest-shared'
 import { TenantProvider } from '../entities/tenant-provider.entity';
 import { AgentEnabledProvider } from '../entities/agent-enabled-provider.entity';
 import { CustomProvider } from '../entities/custom-provider.entity';
-import { ProviderModelFetcherService, filterNonChatModels } from './provider-model-fetcher.service';
+import {
+  ProviderModelFetcherService,
+  PROVIDER_BLOCKLIST,
+  PROVIDER_NON_CHAT,
+  filterNonChatModels,
+} from './provider-model-fetcher.service';
 import { ProviderModelRegistryService } from './provider-model-registry.service';
 import { DiscoveredModel, DEFAULT_CONTEXT_WINDOW } from './model-fetcher';
 import { decrypt, getEncryptionSecret } from '../common/utils/crypto.util';
@@ -13,7 +18,7 @@ import { computeQualityScore } from '../database/quality-score.util';
 import { PricingSyncService } from '../database/pricing-sync.service';
 import { ModelsDevSyncService } from '../database/models-dev-sync.service';
 import { parseOAuthTokenBlob } from '../routing/oauth/core';
-import { getQwenCompatibleBaseUrl, isQwenResolvedRegion } from '../routing/qwen-region';
+import { getQwenCompatibleBaseUrl, isQwenResolvedEndpoint } from '../routing/qwen-region';
 import {
   getBedrockMantleBaseUrl,
   isBedrockProvider,
@@ -37,7 +42,13 @@ import {
   supplementWithKnownModels,
 } from './model-fallback';
 import { lookupKnownPrice } from './known-model-prices';
+import { lookupKnownModalities } from './known-model-modalities';
 import { mergeModelCapabilities, modelSupportsStreaming } from './model-capabilities';
+import {
+  CLOUD_LOCAL_PROVIDER_MESSAGE,
+  filterProvidersForDeployment,
+  isProviderAvailableForDeployment,
+} from '../common/utils/provider-availability';
 // Import static helpers directly to avoid circular dependency with RoutingModule
 const customProviderKey = (id: string) => `custom:${id}`;
 const customModelKey = (id: string, modelName: string) => `custom:${id}/${modelName}`;
@@ -47,12 +58,38 @@ function isQwenProvider(providerId: string): boolean {
   return lower === 'qwen' || lower === 'alibaba';
 }
 
+function modelsDevModelIdPrefix(providerId: string): string | undefined {
+  const lower = providerId.toLowerCase();
+  return lower === 'opencode-go' || lower === 'opencode-zen' ? lower : undefined;
+}
+
+function prefersModelsDevCatalog(providerId: string): boolean {
+  const lower = providerId.toLowerCase();
+  return lower === 'opencode-zen';
+}
+
+function nonChatFilterKey(providerId: string, authType: AuthType): string {
+  const normalizedProvider = providerId.toLowerCase();
+  if (authType !== 'subscription') return normalizedProvider;
+
+  const subscriptionKey = `${normalizedProvider}-subscription`;
+  if (PROVIDER_NON_CHAT[subscriptionKey] || PROVIDER_BLOCKLIST[subscriptionKey]) {
+    return subscriptionKey;
+  }
+  return normalizedProvider;
+}
+
 /** 2-minute TTL for the per-agent discovered-model list, matching RoutingCacheService. */
 const MODELS_CACHE_TTL_MS = 120_000;
 
 interface ModelsCacheEntry {
   data: DiscoveredModel[];
   expiresAt: number;
+}
+
+interface DiscoverModelsOptions {
+  forceRefresh?: boolean;
+  skipModelsDevRefresh?: boolean;
 }
 
 @Injectable()
@@ -92,7 +129,11 @@ export class ModelDiscoveryService {
     private readonly enabledProviderRepo: Repository<AgentEnabledProvider> | null = null,
   ) {}
 
-  async discoverModels(provider: TenantProvider): Promise<DiscoveredModel[]> {
+  async discoverModels(
+    provider: TenantProvider,
+    options: DiscoverModelsOptions = {},
+  ): Promise<DiscoveredModel[]> {
+    if (!isProviderAvailableForDeployment(provider.provider)) return [];
     let apiKey = '';
     let endpointOverride: string | undefined;
     const lowerProvider = provider.provider.toLowerCase();
@@ -131,7 +172,7 @@ export class ModelDiscoveryService {
         // region column so CN tokens discover models against the CN host
         // instead of incorrectly probing api.minimax.io.
         if (lowerProvider === 'minimax' && !endpointOverride && provider.region === 'cn') {
-          endpointOverride = `${MINIMAX_BASE_URLS.cn}/anthropic`;
+          endpointOverride = `${MINIMAX_BASE_URLS.cn}/anthropic/v1`;
         }
       } else if (lowerProvider === 'copilot' && this.copilotTokenService) {
         try {
@@ -144,7 +185,7 @@ export class ModelDiscoveryService {
         }
       }
     }
-    if (isQwenProvider(provider.provider) && isQwenResolvedRegion(provider.region)) {
+    if (isQwenProvider(provider.provider) && isQwenResolvedEndpoint(provider.region)) {
       endpointOverride = getQwenCompatibleBaseUrl(provider.region);
     }
     if (isBedrockProvider(provider.provider) && isBedrockRegion(provider.region)) {
@@ -168,10 +209,35 @@ export class ModelDiscoveryService {
       endpointOverride = provider.region;
     }
 
+    if (options.forceRefresh && !options.skipModelsDevRefresh) {
+      await this.refreshModelsDevCache();
+    }
+
     let raw: DiscoveredModel[];
 
     const useCuratedSubscriptionModels =
       provider.auth_type === 'subscription' && (!apiKey || lowerProvider === 'anthropic');
+
+    const fetchProviderModels = () =>
+      options.forceRefresh
+        ? this.fetcher.fetch(provider.provider, apiKey, provider.auth_type, endpointOverride, {
+            forceRefresh: true,
+          })
+        : this.fetcher.fetch(provider.provider, apiKey, provider.auth_type, endpointOverride);
+
+    const buildModelsDevModels = () => {
+      const models = buildModelsDevFallback(this.modelsDevSync, provider.provider, {
+        idPrefix: modelsDevModelIdPrefix(provider.provider),
+      });
+      if (lowerProvider !== 'opencode-go') return models;
+      // OpenCode Go is surfaced as a subscription gateway with per-request
+      // quota cost from the docs catalog, not token pricing from models.dev.
+      return models.map((model) => ({
+        ...model,
+        inputPricePerToken: 0,
+        outputPricePerToken: 0,
+      }));
+    };
 
     // Subscription providers without a token use curated fallback. Anthropic
     // subscription discovery is also static so connecting Claude Code does
@@ -183,13 +249,15 @@ export class ModelDiscoveryService {
           `Subscription provider ${provider.provider} — using ${raw.length} curated models`,
         );
       }
+    } else if (prefersModelsDevCatalog(provider.provider)) {
+      raw = buildModelsDevModels();
+      if (raw.length > 0) {
+        this.logger.log(`Using ${raw.length} models from models.dev for ${provider.provider}`);
+      } else {
+        raw = await fetchProviderModels();
+      }
     } else {
-      raw = await this.fetcher.fetch(
-        provider.provider,
-        apiKey,
-        provider.auth_type,
-        endpointOverride,
-      );
+      raw = await fetchProviderModels();
 
       // Register confirmed model IDs from native API for future fallback filtering
       if (raw.length > 0 && this.modelRegistry) {
@@ -209,9 +277,9 @@ export class ModelDiscoveryService {
         }
       }
 
-      // If native API returned no models, try models.dev first (native IDs), then OpenRouter
+      // If native API returned no models, try models.dev first, then OpenRouter.
       if (raw.length === 0) {
-        raw = buildModelsDevFallback(this.modelsDevSync, provider.provider);
+        raw = buildModelsDevModels();
         if (raw.length > 0) {
           this.logger.log(
             `Native API returned 0 models for ${provider.provider} — using ${raw.length} models from models.dev`,
@@ -289,19 +357,37 @@ export class ModelDiscoveryService {
     return filtered;
   }
 
-  async discoverAllForAgent(tenantId: string): Promise<void> {
-    const providers = await this.providerRepo.find({
-      where: { tenant_id: tenantId, is_active: true },
-    });
+  async discoverAllForAgent(tenantId: string, options: DiscoverModelsOptions = {}): Promise<void> {
+    if (options.forceRefresh) {
+      await this.refreshModelsDevCache();
+    }
+    const discoveryOptions = options.forceRefresh
+      ? { ...options, skipModelsDevRefresh: true }
+      : options;
+    const providers = filterProvidersForDeployment(
+      await this.providerRepo.find({
+        where: { tenant_id: tenantId, is_active: true },
+      }),
+    );
     await Promise.all(
       providers
         .filter((p) => !p.provider.startsWith('custom:'))
         .map((p) =>
-          this.discoverModels(p).catch((err) => {
+          this.discoverModels(p, discoveryOptions).catch((err) => {
             this.logger.warn(`Discovery failed for ${p.provider}: ${err}`);
           }),
         ),
     );
+  }
+
+  private async refreshModelsDevCache(): Promise<void> {
+    if (!this.modelsDevSync) return;
+    try {
+      await this.modelsDevSync.refreshCache();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`models.dev refresh failed during manual model discovery: ${message}`);
+    }
   }
 
   async refreshProvider(
@@ -314,51 +400,92 @@ export class ModelDiscoveryService {
     last_fetched_at: string | null;
     error: string | null;
   }> {
+    if (!isProviderAvailableForDeployment(providerId)) {
+      return {
+        ok: false,
+        model_count: 0,
+        last_fetched_at: null,
+        error: CLOUD_LOCAL_PROVIDER_MESSAGE,
+      };
+    }
     const where: { tenant_id: string; provider: string; is_active: true; auth_type?: AuthType } = {
       tenant_id: tenantId,
       provider: providerId,
       is_active: true,
     };
     if (authType) where.auth_type = authType;
-    const provider = await this.providerRepo.findOne({ where });
-    if (!provider) {
+    // A tenant can connect multiple keys for the same provider/auth type. The
+    // picker reads whichever rows are enabled for the agent, so refresh all of
+    // them instead of leaving an arbitrary `findOne` row's siblings stale.
+    const providers = await this.providerRepo.find({ where });
+    if (providers.length === 0) {
       return { ok: false, model_count: 0, last_fetched_at: null, error: 'Provider not found' };
     }
-    // Snapshot the pre-refresh state so error/skip paths can report the count
-    // and timestamp the user already had on disk, even after `discoverModels`
-    // mutates the entity in-memory.
-    const previousCount = Array.isArray(provider.cached_models) ? provider.cached_models.length : 0;
-    const previousFetchedAt = provider.models_fetched_at;
 
-    if (provider.provider.startsWith('custom:')) {
+    if (providers[0].provider.startsWith('custom:')) {
+      const previousCount = Math.max(
+        ...providers.map((provider) =>
+          Array.isArray(provider.cached_models) ? provider.cached_models.length : 0,
+        ),
+      );
+      const previousFetchedAt = providers
+        .map((provider) => provider.models_fetched_at)
+        .filter((value): value is string => value !== null)
+        .sort()
+        .pop();
       return {
         ok: false,
         model_count: previousCount,
-        last_fetched_at: previousFetchedAt,
+        last_fetched_at: previousFetchedAt ?? null,
         error: 'Custom providers are managed manually — edit the provider to update its model list',
       };
     }
 
-    try {
-      const models = await this.discoverModels(provider);
-      return {
-        ok: models.length > 0,
-        model_count: models.length,
-        last_fetched_at: provider.models_fetched_at,
-        error: models.length === 0 ? 'Provider returned no models' : null,
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.logger.warn(
-        `Per-provider refresh failed for ${provider.provider} (tenant ${tenantId}): ${message}`,
-      );
-      return {
-        ok: false,
-        model_count: previousCount,
-        last_fetched_at: previousFetchedAt,
-        error: message,
-      };
-    }
+    await this.refreshModelsDevCache();
+    const results = await Promise.all(
+      providers.map(async (provider) => {
+        const previousCount = Array.isArray(provider.cached_models)
+          ? provider.cached_models.length
+          : 0;
+        const previousFetchedAt = provider.models_fetched_at;
+        try {
+          const models = await this.discoverModels(provider, {
+            forceRefresh: true,
+            skipModelsDevRefresh: true,
+          });
+          return {
+            ok: models.length > 0,
+            modelCount: models.length,
+            lastFetchedAt: provider.models_fetched_at,
+            error: models.length === 0 ? 'Provider returned no models' : null,
+          };
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.logger.warn(
+            `Per-provider refresh failed for ${provider.provider} (tenant ${tenantId}): ${message}`,
+          );
+          return {
+            ok: false,
+            modelCount: previousCount,
+            lastFetchedAt: previousFetchedAt,
+            error: message,
+          };
+        }
+      }),
+    );
+
+    const failed = results.find((result) => !result.ok);
+    const lastFetchedAt = results
+      .map((result) => result.lastFetchedAt)
+      .filter((value): value is string => value !== null)
+      .sort()
+      .pop();
+    return {
+      ok: failed === undefined,
+      model_count: Math.max(...results.map((result) => result.modelCount)),
+      last_fetched_at: lastFetchedAt ?? null,
+      error: failed?.error ?? null,
+    };
   }
 
   /**
@@ -410,9 +537,11 @@ export class ModelDiscoveryService {
     tenantId: string,
     agentId?: string,
   ): Promise<DiscoveredModel[]> {
-    const allProviders = await this.providerRepo.find({
-      where: { tenant_id: tenantId, is_active: true },
-    });
+    const allProviders = filterProvidersForDeployment(
+      await this.providerRepo.find({
+        where: { tenant_id: tenantId, is_active: true },
+      }),
+    );
     const providers = await this.filterProvidersForAgent(allProviders, agentId);
 
     const models: DiscoveredModel[] = [];
@@ -424,10 +553,7 @@ export class ModelDiscoveryService {
       if (!Array.isArray(rawCached)) continue;
       const providerAuthType: AuthType = p.auth_type;
       const providerId = p.provider.toLowerCase();
-      const filterKey =
-        providerId === 'openai' && providerAuthType === 'subscription'
-          ? 'openai-subscription'
-          : providerId;
+      const filterKey = nonChatFilterKey(providerId, providerAuthType);
       const cached = filterNonChatModels(rawCached, filterKey);
       for (const m of cached) {
         const effectiveAuthType = m.authType ?? providerAuthType;
@@ -514,6 +640,18 @@ export class ModelDiscoveryService {
   }
 
   private enrichModel(model: DiscoveredModel, providerId: string): DiscoveredModel {
+    // Fill modality gaps from the curated list before enrichment, so
+    // provider-native and models.dev modalities (applied below) still win.
+    const knownModalities = lookupKnownModalities(providerId, model.id);
+    if (knownModalities) {
+      model = {
+        ...model,
+        inputModalities: model.inputModalities ?? knownModalities.input,
+        outputModalities: model.outputModalities ?? knownModalities.output,
+        capabilities: mergeModelCapabilities(model.capabilities, knownModalities.capabilities),
+      };
+    }
+
     // Skip pricing enrichment when both prices are already set (price=0 for free/subscription)
     // but still apply capability flags from models.dev for better scoring
     if (

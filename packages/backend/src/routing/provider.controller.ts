@@ -4,12 +4,15 @@ import {
   Controller,
   Delete,
   Get,
+  Inject,
   Param,
   Patch,
   Post,
   Put,
   Query,
 } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
 import { TenantCtx, TenantContext } from '../common/decorators/tenant-context.decorator';
 import { ProviderService } from './routing-core/provider.service';
 import { ResolveAgentService } from './routing-core/resolve-agent.service';
@@ -26,10 +29,14 @@ import {
   RenameProviderKeyDto,
   ReorderProviderKeysDto,
 } from './dto/routing.dto';
-import { isQwenRegion } from './qwen-region';
+import { QWEN_REGION_VALIDATION_MESSAGE, isQwenRegion } from './qwen-region';
 import { getSubscriptionEndpointRegionConfig } from './subscription-region';
 import { isBedrockProvider, isBedrockRegion } from './bedrock-region';
 import { isAzureFoundryProvider, normalizeAzureFoundryEndpoint } from './azure-foundry';
+import {
+  CLOUD_LOCAL_PROVIDER_MESSAGE,
+  isProviderAvailableForDeployment,
+} from '../common/utils/provider-availability';
 
 @Controller('api/v1/routing')
 export class ProviderController {
@@ -40,6 +47,7 @@ export class ProviderController {
     private readonly resolveAgentService: ResolveAgentService,
     private readonly tierService: TierService,
     private readonly pricingSync: PricingSyncService,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
   @Get(':agentName/status')
@@ -105,16 +113,32 @@ export class ProviderController {
       allowPlayground: true,
     });
     const lowerProvider = body.provider.toLowerCase();
+    if (
+      !isProviderAvailableForDeployment(lowerProvider) ||
+      (body.authType === 'local' && !isProviderAvailableForDeployment('ollama'))
+    ) {
+      throw new BadRequestException(CLOUD_LOCAL_PROVIDER_MESSAGE);
+    }
     const isQwenProvider = lowerProvider === 'qwen' || lowerProvider === 'alibaba';
+    const qwenBaseUrl = body.baseUrl ?? body.base_url;
+    const qwenRegion = qwenBaseUrl ?? body.region;
     const subscriptionRegionConfig = getSubscriptionEndpointRegionConfig(
       lowerProvider,
       body.authType,
     );
 
-    if (body.region !== undefined) {
+    if (qwenBaseUrl !== undefined && !isQwenProvider) {
+      throw new BadRequestException('baseUrl is only supported for Alibaba/Qwen providers');
+    }
+
+    if (qwenBaseUrl !== undefined && body.region !== undefined) {
+      throw new BadRequestException('Use either region or baseUrl for Alibaba/Qwen providers');
+    }
+
+    if (qwenRegion !== undefined || body.region !== undefined) {
       if (isQwenProvider) {
-        if (!isQwenRegion(body.region)) {
-          throw new BadRequestException('region must be one of: auto, singapore, us, beijing');
+        if (!isQwenRegion(qwenRegion)) {
+          throw new BadRequestException(QWEN_REGION_VALIDATION_MESSAGE);
         }
       } else if (isBedrockProvider(lowerProvider) && (body.authType ?? 'api_key') === 'api_key') {
         if (!isBedrockRegion(body.region)) {
@@ -128,7 +152,7 @@ export class ProviderController {
         // URL. Validate it here the same way the service layer does, so the
         // request isn't rejected by the catch-all below before it reaches
         // ProviderService.resolveProviderRegion.
-        if (!normalizeAzureFoundryEndpoint(body.region)) {
+        if (body.region === undefined || !normalizeAzureFoundryEndpoint(body.region)) {
           throw new BadRequestException(
             'Azure AI Foundry endpoint must be a valid HTTPS URL ending in .services.ai.azure.com or .openai.azure.com',
           );
@@ -158,7 +182,7 @@ export class ProviderController {
       body.provider,
       body.apiKey,
       body.authType,
-      body.region,
+      qwenRegion,
       body.label,
       ctx.userId,
     );
@@ -254,6 +278,7 @@ export class ProviderController {
       query.authType,
       query.label,
     );
+    await this.cacheManager.clear();
     return { ok: true, notifications };
   }
 }

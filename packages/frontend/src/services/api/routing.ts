@@ -61,6 +61,8 @@ export function connectProvider(
     authType?: AuthType;
     label?: string;
     region?: string;
+    baseUrl?: string;
+    base_url?: string;
   },
 ) {
   return fetchMutate<{
@@ -171,6 +173,28 @@ export function getComplexityStatus(agentName: string) {
 export function toggleComplexity(agentName: string) {
   return fetchMutate<ComplexityStatus>(routingPath(agentName, 'complexity/toggle'), {
     method: 'POST',
+  });
+}
+
+/* -- Routing: Auto-fix -- */
+
+export interface AutofixConfig {
+  enabled: boolean;
+  /** Whether this tenant has Auto-fix early access (waitlist / GA). The toggle
+   *  is only shown when true; the rest of the time the "Get early access" card
+   *  in the sidebar is the entry point. */
+  available: boolean;
+}
+
+export function getAutofix(agentName: string) {
+  return fetchJson<AutofixConfig>(routingPath(agentName, 'autofix'));
+}
+
+export function updateAutofix(agentName: string, body: { enabled?: boolean }) {
+  return fetchMutate<AutofixConfig>(routingPath(agentName, 'autofix'), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
 }
 

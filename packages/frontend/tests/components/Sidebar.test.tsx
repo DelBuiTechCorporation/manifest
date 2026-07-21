@@ -34,9 +34,9 @@ vi.mock("../../src/services/api.js", () => ({
   getAgents: (...args: unknown[]) => mockGetAgents(...args),
 }));
 
-// The SSE ping signal drives the agents resource refetch — a stable 0 is fine.
-vi.mock("../../src/services/sse.js", () => ({
-  agentPing: () => 0,
+const mockGetBillingStatus = vi.fn();
+vi.mock("../../src/services/api/billing.js", () => ({
+  getBillingStatus: (...args: unknown[]) => mockGetBillingStatus(...args),
 }));
 
 // Local providers only exist on self-hosted installs; the Sidebar hides the
@@ -68,7 +68,26 @@ vi.mock("../../src/components/AddAgentModal.jsx", async () => {
   };
 });
 
+// Stub the AutofixModal for the same reason.
+const mockAutofixModal = vi.fn();
+vi.mock("../../src/components/AutofixModal.jsx", async () => {
+  const { Show } = await import("solid-js");
+  return {
+    default: (props: any) => (
+      <Show
+        when={(() => {
+          mockAutofixModal(props.open);
+          return props.open;
+        })()}
+      >
+        <div data-testid="autofix-modal" />
+      </Show>
+    ),
+  };
+});
+
 import Sidebar from "../../src/components/Sidebar";
+import { refreshAgents } from "../../src/services/sse";
 
 const SAMPLE_AGENTS = [
   {
@@ -90,6 +109,11 @@ beforeEach(() => {
   mockPathname = "/overview";
   mockIsSelfHosted = true;
   mockGetAgents.mockResolvedValue({ agents: SAMPLE_AGENTS });
+  mockGetBillingStatus.mockResolvedValue({
+    enabled: false,
+    plan: "free",
+    requests: { used: null, limit: null, periodEnd: null },
+  });
 });
 
 describe("Sidebar — global nav links", () => {
@@ -98,9 +122,9 @@ describe("Sidebar — global nav links", () => {
     expect(screen.getByText("Overview")).toBeDefined();
   });
 
-  it("renders Messages link", () => {
+  it("renders Requests link", () => {
     render(() => <Sidebar />);
-    expect(screen.getByText("Messages")).toBeDefined();
+    expect(screen.getByText("Requests")).toBeDefined();
   });
 
   it("renders provider section links (Local resolves async, self-hosted)", async () => {
@@ -162,9 +186,9 @@ describe("Sidebar — global nav links", () => {
     expect(links).toEqual([
       "/overview",
       "/messages",
-      "/providers/subscriptions",
-      "/providers/usage-based",
       "/providers/local",
+      "/providers/usage-based",
+      "/providers/subscriptions",
       "/playground",
     ]);
     // The collapsible section replaces the old static link — there is no
@@ -302,6 +326,24 @@ describe("Sidebar — harness switcher list", () => {
     await waitFor(() => {
       expect(container.querySelectorAll("a.sidebar__agent-item").length).toBe(2);
     });
+  });
+
+  it("refetches when a harness is created locally", async () => {
+    mockGetAgents.mockResolvedValueOnce({ agents: [] }).mockResolvedValueOnce({
+      agents: [{ agent_name: "new-harness", display_name: "New Harness" }],
+    });
+    const { container } = render(() => <Sidebar />);
+
+    await waitFor(() => {
+      expect(container.querySelector(".sidebar__agents-empty")).not.toBeNull();
+    });
+
+    refreshAgents();
+
+    await waitFor(() => {
+      expect(container.querySelector('a[href="/harnesses/new-harness"]')).not.toBeNull();
+    });
+    expect(mockGetAgents).toHaveBeenCalledTimes(2);
   });
 
   it("renders the empty state only once the resource resolves empty (not while loading)", async () => {
@@ -470,13 +512,74 @@ describe("Sidebar — structure and interaction", () => {
     expect(onNavigate).toHaveBeenCalled();
   });
 
-  it("renders Feedback section with hint and external attributes", () => {
+  it("does not render the old Feedback section", () => {
     const { container } = render(() => <Sidebar />);
-    expect(screen.getByText("Feedback")).toBeDefined();
-    expect(container.textContent).toContain("Share ideas or report bugs");
-    const feedbackLink = container.querySelector("a.sidebar__feedback") as HTMLAnchorElement;
-    expect(feedbackLink).not.toBeNull();
-    expect(feedbackLink.target).toBe("_blank");
-    expect(feedbackLink.rel).toContain("noopener");
+    expect(container.querySelector("a.sidebar__feedback")).toBeNull();
+  });
+});
+
+describe("Sidebar — Auto-fix card", () => {
+  it("describes Auto-fix without claiming it is already enabled", () => {
+    const { container } = render(() => <Sidebar />);
+    expect(container.querySelector(".sidebar-autofix")).not.toBeNull();
+    expect(container.querySelector(".sidebar-autofix__new-badge")).toBeNull();
+    expect(container.querySelector(".sidebar-autofix__title")?.textContent).toBe("Discover Auto-fix");
+    expect(container.textContent).toContain("Auto-fix can repair eligible failing requests");
+    expect(container.textContent).not.toContain("Failing requests are automatically fixed");
+    const link = container.querySelector(".sidebar-autofix__btn") as HTMLAnchorElement;
+    expect(link?.textContent).toBe("Learn more");
+    expect(link?.getAttribute("href")).toBe("https://manifest.build/autofix/");
+    expect(link?.getAttribute("target")).toBe("_blank");
+    expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+});
+
+describe("Sidebar — usage card", () => {
+  it("renders free-plan usage and the near-limit warning state", async () => {
+    mockGetBillingStatus.mockResolvedValue({
+      enabled: true,
+      plan: "free",
+      requests: { used: 8_500, limit: 10_000, periodEnd: null },
+    });
+
+    const { container } = render(() => <Sidebar />);
+
+    await screen.findByText(/8,500/);
+    expect(container.querySelector(".sidebar-usage__count--danger")).not.toBeNull();
+    expect(container.querySelector(".sidebar-usage__fill--danger")).not.toBeNull();
+    expect(container.textContent).toContain(
+      "You're limited to 10,000 requests this month. Upgrade for unlimited.",
+    );
+    expect(container.querySelector('a[href="/upgrade"]')).not.toBeNull();
+  });
+
+  it("renders the reached-limit warning state", async () => {
+    mockGetBillingStatus.mockResolvedValue({
+      enabled: true,
+      plan: "free",
+      requests: { used: 10_001, limit: 10_000, periodEnd: null },
+    });
+
+    const { container } = render(() => <Sidebar />);
+
+    await screen.findByText(/10,001/);
+    expect(container.textContent).toContain(
+      "You've reached your monthly limit. Requests are being blocked.",
+    );
+    expect(container.querySelector(".sidebar-usage__fill--danger")).not.toBeNull();
+  });
+
+  it("renders the warning fill before the danger threshold", async () => {
+    mockGetBillingStatus.mockResolvedValue({
+      enabled: true,
+      plan: "free",
+      requests: { used: 5_500, limit: 10_000, periodEnd: null },
+    });
+
+    const { container } = render(() => <Sidebar />);
+
+    await screen.findByText(/5,500/);
+    expect(container.querySelector(".sidebar-usage__fill--warning")).not.toBeNull();
+    expect(container.querySelector(".sidebar-usage__fill--danger")).toBeNull();
   });
 });

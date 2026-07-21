@@ -86,6 +86,7 @@ function makeMockRepo() {
 }
 
 describe('ModelDiscoveryService', () => {
+  const previousMode = process.env['MANIFEST_MODE'];
   let service: ModelDiscoveryService;
   let providerRepo: ReturnType<typeof makeMockRepo>;
   let customProviderRepo: ReturnType<typeof makeMockRepo>;
@@ -95,10 +96,15 @@ describe('ModelDiscoveryService', () => {
     registerModels: jest.Mock;
     getConfirmedModels: jest.Mock;
   };
-  let mockModelsDevSync: { lookupModel: jest.Mock; getModelsForProvider: jest.Mock };
+  let mockModelsDevSync: {
+    lookupModel: jest.Mock;
+    getModelsForProvider: jest.Mock;
+    refreshCache: jest.Mock;
+  };
   let mockCopilotTokenService: { getCopilotToken: jest.Mock };
 
   beforeEach(() => {
+    process.env['MANIFEST_MODE'] = 'selfhosted';
     providerRepo = makeMockRepo();
     customProviderRepo = makeMockRepo();
     fetcher = { fetch: jest.fn().mockResolvedValue([]) };
@@ -109,6 +115,7 @@ describe('ModelDiscoveryService', () => {
     mockModelsDevSync = {
       lookupModel: jest.fn().mockReturnValue(null),
       getModelsForProvider: jest.fn().mockReturnValue([]),
+      refreshCache: jest.fn().mockResolvedValue(0),
     };
     mockModelRegistry = {
       registerModels: jest.fn(),
@@ -133,6 +140,11 @@ describe('ModelDiscoveryService', () => {
     );
   });
 
+  afterAll(() => {
+    if (previousMode === undefined) delete process.env['MANIFEST_MODE'];
+    else process.env['MANIFEST_MODE'] = previousMode;
+  });
+
   afterEach(() => {
     jest.clearAllMocks();
   });
@@ -140,6 +152,18 @@ describe('ModelDiscoveryService', () => {
   /* ── discoverModels ── */
 
   describe('discoverModels', () => {
+    it('does not contact a built-in local runtime from cloud', async () => {
+      process.env['MANIFEST_MODE'] = 'cloud';
+
+      const result = await service.discoverModels(
+        makeProvider({ provider: 'ollama', auth_type: 'local', api_key_encrypted: null }),
+      );
+
+      expect(result).toEqual([]);
+      expect(fetcher.fetch).not.toHaveBeenCalled();
+      expect(providerRepo.save).not.toHaveBeenCalled();
+    });
+
     it('should decrypt key, fetch, enrich, and cache models', async () => {
       const models = [makeModel({ id: 'gpt-4' })];
       fetcher.fetch.mockResolvedValue(models);
@@ -193,6 +217,35 @@ describe('ModelDiscoveryService', () => {
       await service.discoverModels(provider);
 
       expect(fetcher.fetch).toHaveBeenCalledWith('kiro', 'kiro-access', 'subscription', undefined);
+    });
+
+    it('should fill capability gaps from the curated known-modalities list', async () => {
+      fetcher.fetch.mockResolvedValue([
+        makeModel({ id: 'gpt-5.3-codex-spark', inputPricePerToken: 0, outputPricePerToken: 0 }),
+      ]);
+
+      const result = await service.discoverModels(makeProvider());
+
+      expect(result[0].inputModalities).toEqual(['text']);
+      expect(result[0].outputModalities).toEqual(['text']);
+      expect(result[0].capabilities).toEqual(expect.arrayContaining(['text', 'tools', 'stream']));
+    });
+
+    it('should keep discovered modalities over the curated known-modalities list', async () => {
+      fetcher.fetch.mockResolvedValue([
+        makeModel({
+          id: 'gpt-5.3-codex-spark',
+          inputPricePerToken: 0,
+          outputPricePerToken: 0,
+          inputModalities: ['text', 'image'],
+          outputModalities: ['text', 'image'],
+        }),
+      ]);
+
+      const result = await service.discoverModels(makeProvider());
+
+      expect(result[0].inputModalities).toEqual(['text', 'image']);
+      expect(result[0].outputModalities).toEqual(['text', 'image']);
     });
 
     it('should enrich models with openRouter pricing when available', async () => {
@@ -472,6 +525,39 @@ describe('ModelDiscoveryService', () => {
       expect(fetcher.fetch).toHaveBeenCalledTimes(1);
     });
 
+    it('passes forceRefresh through to provider discovery when requested', async () => {
+      const providers = [
+        makeProvider({ id: 'p1', provider: 'opencode-go', auth_type: 'subscription' }),
+      ];
+      providerRepo.find.mockResolvedValue(providers);
+      fetcher.fetch.mockResolvedValue([makeModel({ id: 'opencode-go/glm-5.2' })]);
+
+      await service.discoverAllForAgent('tenant-1', { forceRefresh: true });
+
+      expect(fetcher.fetch).toHaveBeenCalledWith(
+        'opencode-go',
+        'decrypted-key',
+        'subscription',
+        undefined,
+        { forceRefresh: true },
+      );
+    });
+
+    it('refreshes models.dev once for a forced all-provider refresh', async () => {
+      const providers = [
+        makeProvider({ id: 'p1', provider: 'openai' }),
+        makeProvider({ id: 'p2', provider: 'anthropic' }),
+      ];
+      providerRepo.find.mockResolvedValue(providers);
+
+      await service.discoverAllForAgent('tenant-1', { forceRefresh: true });
+
+      expect(mockModelsDevSync.refreshCache).toHaveBeenCalledTimes(1);
+      expect(fetcher.fetch).toHaveBeenCalledWith('openai', 'decrypted-key', 'api_key', undefined, {
+        forceRefresh: true,
+      });
+    });
+
     it('should not throw when individual discovery fails', async () => {
       const providers = [
         makeProvider({ id: 'p1', provider: 'openai' }),
@@ -492,8 +578,21 @@ describe('ModelDiscoveryService', () => {
   /* ── refreshProvider ── */
 
   describe('refreshProvider', () => {
+    it('rejects built-in local refreshes in cloud before reading the provider row', async () => {
+      process.env['MANIFEST_MODE'] = 'cloud';
+
+      const result = await service.refreshProvider('tenant-1', 'ollama', 'local');
+
+      expect(result).toEqual({
+        ok: false,
+        model_count: 0,
+        last_fetched_at: null,
+        error: expect.stringContaining('only available in self-hosted Manifest'),
+      });
+      expect(providerRepo.find).not.toHaveBeenCalled();
+    });
+
     it('returns Provider not found when no row matches', async () => {
-      providerRepo.findOne.mockResolvedValue(null);
       const result = await service.refreshProvider('agent-1', 'openai');
       expect(result).toEqual({
         ok: false,
@@ -504,13 +603,13 @@ describe('ModelDiscoveryService', () => {
     });
 
     it('refuses custom providers and reports the cached count', async () => {
-      providerRepo.findOne.mockResolvedValue(
+      providerRepo.find.mockResolvedValue([
         makeProvider({
           provider: 'custom:cp-1',
           cached_models: [makeModel({ id: 'foo' }), makeModel({ id: 'bar' })],
           models_fetched_at: '2026-04-12T08:00:00.000Z',
         }),
-      );
+      ]);
       const result = await service.refreshProvider('agent-1', 'custom:cp-1');
       expect(result.ok).toBe(false);
       expect(result.model_count).toBe(2);
@@ -520,15 +619,18 @@ describe('ModelDiscoveryService', () => {
 
     it('returns ok with the discovered count on success', async () => {
       const provider = makeProvider({ provider: 'openai' });
-      providerRepo.findOne.mockResolvedValue(provider);
+      providerRepo.find.mockResolvedValue([provider]);
       fetcher.fetch.mockResolvedValue([
         makeModel({ id: 'gpt-4o' }),
         makeModel({ id: 'gpt-4o-mini' }),
       ]);
 
       const result = await service.refreshProvider('tenant-1', 'openai', 'api_key');
-      expect(providerRepo.findOne).toHaveBeenCalledWith({
+      expect(providerRepo.find).toHaveBeenCalledWith({
         where: { tenant_id: 'tenant-1', provider: 'openai', is_active: true, auth_type: 'api_key' },
+      });
+      expect(fetcher.fetch).toHaveBeenCalledWith('openai', 'decrypted-key', 'api_key', undefined, {
+        forceRefresh: true,
       });
       expect(result.ok).toBe(true);
       expect(result.model_count).toBe(2);
@@ -536,9 +638,48 @@ describe('ModelDiscoveryService', () => {
       expect(result.last_fetched_at).toBeDefined();
     });
 
+    it('refreshes every matching API-key connection', async () => {
+      const first = makeProvider({
+        id: 'openai-key-1',
+        api_key_encrypted: 'encrypted-key-1',
+      });
+      const second = makeProvider({
+        id: 'openai-key-2',
+        api_key_encrypted: 'encrypted-key-2',
+      });
+      providerRepo.find.mockResolvedValue([first, second]);
+      mockDecrypt.mockImplementation((encrypted) => encrypted.replace('encrypted-', ''));
+      fetcher.fetch.mockImplementation(async (_provider, apiKey) =>
+        apiKey === 'key-1'
+          ? [makeModel({ id: 'gpt-4o' })]
+          : [
+              makeModel({ id: 'gpt-5.6-sol' }),
+              makeModel({ id: 'gpt-5.6-terra' }),
+              makeModel({ id: 'gpt-5.6-luna' }),
+            ],
+      );
+
+      const result = await service.refreshProvider('tenant-1', 'openai', 'api_key');
+
+      expect(fetcher.fetch).toHaveBeenCalledTimes(2);
+      expect(first.cached_models?.map((model) => model.id)).toEqual(['gpt-4o']);
+      expect(second.cached_models?.map((model) => model.id)).toEqual([
+        'gpt-5.6-sol',
+        'gpt-5.6-terra',
+        'gpt-5.6-luna',
+      ]);
+      expect(mockModelsDevSync.refreshCache).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({
+        ok: true,
+        model_count: 3,
+        last_fetched_at: expect.any(String),
+        error: null,
+      });
+    });
+
     it('returns ok=false with hint when provider returns no models', async () => {
       const provider = makeProvider({ provider: 'openai', cached_models: null });
-      providerRepo.findOne.mockResolvedValue(provider);
+      providerRepo.find.mockResolvedValue([provider]);
       fetcher.fetch.mockResolvedValue([]);
 
       const result = await service.refreshProvider('agent-1', 'openai');
@@ -549,13 +690,13 @@ describe('ModelDiscoveryService', () => {
 
     it('preserves cached models and reports prior count when discovery throws', async () => {
       const cachedModels = [makeModel({ id: 'gpt-4o' }), makeModel({ id: 'gpt-4o-mini' })];
-      providerRepo.findOne.mockResolvedValue(
+      providerRepo.find.mockResolvedValue([
         makeProvider({
           provider: 'openai',
           cached_models: cachedModels,
           models_fetched_at: '2026-04-01T08:00:00.000Z',
         }),
-      );
+      ]);
       // discoverModels itself swallows fetcher errors, so to land in the
       // refreshProvider catch we make the cache-write throw instead.
       fetcher.fetch.mockResolvedValue([makeModel({ id: 'gpt-4o' })]);
@@ -569,7 +710,7 @@ describe('ModelDiscoveryService', () => {
     });
 
     it('reports a non-Error thrown value via String() in the error field', async () => {
-      providerRepo.findOne.mockResolvedValue(makeProvider({ provider: 'openai' }));
+      providerRepo.find.mockResolvedValue([makeProvider({ provider: 'openai' })]);
       fetcher.fetch.mockResolvedValue([makeModel({ id: 'gpt-4o' })]);
       providerRepo.save.mockRejectedValueOnce('plain-string-failure');
 
@@ -606,6 +747,30 @@ describe('ModelDiscoveryService', () => {
   /* ── getModelsForAgent ── */
 
   describe('getModelsForAgent', () => {
+    it('hides built-in local models in cloud but keeps tunneled custom models', async () => {
+      process.env['MANIFEST_MODE'] = 'cloud';
+      providerRepo.find.mockResolvedValue([
+        makeProvider({
+          id: 'ollama-row',
+          provider: 'ollama',
+          auth_type: 'local',
+          cached_models: [makeModel({ id: 'qwen2.5:0.5b', provider: 'ollama' })],
+        }),
+        makeProvider({
+          id: 'custom-row',
+          provider: 'custom:cp-1',
+          auth_type: 'local',
+          cached_models: null,
+        }),
+      ]);
+      customProviderRepo.find.mockResolvedValue([makeCustomProvider()]);
+
+      const result = await service.getModelsForAgent('tenant-1');
+
+      expect(result.map((model) => model.id)).toEqual(['custom:cp-1/custom-llm']);
+      expect(result[0].authType).toBe('local');
+    });
+
     it('should merge cached models from providers and custom providers', async () => {
       const cachedModels = [makeModel({ id: 'gpt-4', provider: 'openai' })];
       const providers = [makeProvider({ cached_models: cachedModels })];
@@ -642,6 +807,30 @@ describe('ModelDiscoveryService', () => {
       const result = await service.getModelsForAgent('agent-1');
 
       expect(result.map((m) => m.id)).toEqual(['gpt-5.5', 'gpt-5.3-codex-spark']);
+    });
+
+    it('should keep Mistral Vibe subscription cached models that API-key Mistral hides', async () => {
+      const providers = [
+        makeProvider({
+          provider: 'mistral',
+          auth_type: 'subscription',
+          cached_models: [
+            makeModel({
+              id: 'mistral-vibe-cli-latest',
+              provider: 'mistral',
+              authType: 'subscription',
+            }),
+          ],
+        }),
+      ];
+      providerRepo.find.mockResolvedValue(providers);
+      customProviderRepo.find.mockResolvedValue([]);
+
+      const result = await service.getModelsForAgent('agent-1');
+
+      expect(result.map((m) => `${m.provider}:${m.authType}:${m.id}`)).toEqual([
+        'mistral:subscription:mistral-vibe-cli-latest',
+      ]);
     });
 
     it('should inherit auth_type from tenant_providers row for custom provider models', async () => {
@@ -1437,11 +1626,14 @@ describe('ModelDiscoveryService', () => {
       );
 
       expect(fetcher.fetch).not.toHaveBeenCalled();
-      expect(result.map((m) => m.id)).toEqual([
+      // Sorted: the enrichment order of curated entries is not stable across
+      // environments (pricing-cache state moves ids around).
+      expect(result.map((m) => m.id).sort()).toEqual([
         'claude-fable-5',
+        'claude-haiku-4',
         'claude-opus-4',
         'claude-sonnet-4',
-        'claude-haiku-4',
+        'claude-sonnet-5',
       ]);
     });
 
@@ -1490,7 +1682,7 @@ describe('ModelDiscoveryService', () => {
         'minimax',
         'sk-cp-cn-token',
         'subscription',
-        'https://api.minimaxi.com/anthropic',
+        'https://api.minimaxi.com/anthropic/v1',
       );
     });
 
@@ -1656,6 +1848,24 @@ describe('ModelDiscoveryService', () => {
       );
     });
 
+    it('routes Qwen discovery to a stored Alibaba Model Studio base URL', async () => {
+      fetcher.fetch.mockResolvedValue([]);
+      mockPricingSync.getAll.mockReturnValue(new Map());
+
+      const provider = makeProvider({
+        provider: 'qwen',
+        region: 'https://workspace-123.eu-central-1.maas.aliyuncs.com/compatible-mode',
+      });
+      await service.discoverModels(provider);
+
+      expect(fetcher.fetch).toHaveBeenCalledWith(
+        'qwen',
+        'decrypted-key',
+        'api_key',
+        'https://workspace-123.eu-central-1.maas.aliyuncs.com/compatible-mode',
+      );
+    });
+
     it('routes classic Azure OpenAI discovery to the *.openai.azure.com URL', async () => {
       fetcher.fetch.mockResolvedValue([makeModel({ id: 'gpt-4', provider: 'azure' })]);
 
@@ -1814,14 +2024,16 @@ describe('ModelDiscoveryService', () => {
       );
 
       // Should only include models matching knownModels prefixes (claude-opus-4, claude-sonnet-4, claude-haiku-4)
-      // and NOT claude-2.1 or openai models. claude-fable-5 has no OpenRouter
-      // pricing entry, so it is appended directly as a zero-cost known model.
-      expect(result).toHaveLength(4);
+      // and NOT claude-2.1 or openai models. claude-fable-5 and claude-sonnet-5
+      // have no OpenRouter pricing entry, so they are appended directly as
+      // zero-cost known models.
+      expect(result).toHaveLength(5);
       expect(result.map((m) => m.id).sort()).toEqual([
         'claude-fable-5',
         'claude-haiku-4-20260301',
         'claude-opus-4-20260301',
         'claude-sonnet-4-20260301',
+        'claude-sonnet-5',
       ]);
       // All should be stamped as subscription
       for (const m of result) {
@@ -2016,12 +2228,13 @@ describe('ModelDiscoveryService', () => {
       );
 
       // Even without pricingSync, knownModels are returned directly
-      expect(result).toHaveLength(4);
+      expect(result).toHaveLength(5);
       expect(result.map((m) => m.id).sort()).toEqual([
         'claude-fable-5',
         'claude-haiku-4',
         'claude-opus-4',
         'claude-sonnet-4',
+        'claude-sonnet-5',
       ]);
       for (const m of result) {
         expect(m.authType).toBe('subscription');
@@ -2396,12 +2609,13 @@ describe('ModelDiscoveryService', () => {
       const result = buildSubscriptionFallbackModels(null as never, 'anthropic');
 
       // No OpenRouter data, but knownModels are added directly
-      expect(result).toHaveLength(4);
+      expect(result).toHaveLength(5);
       expect(result.map((m) => m.id).sort()).toEqual([
         'claude-fable-5',
         'claude-haiku-4',
         'claude-opus-4',
         'claude-sonnet-4',
+        'claude-sonnet-5',
       ]);
       expect(result[0].inputPricePerToken).toBe(0);
     });
@@ -2480,7 +2694,10 @@ describe('ModelDiscoveryService', () => {
 
       const result = buildSubscriptionFallbackModels(mockPricingSync as never, 'openai');
 
-      expect(result.length).toBe(4);
+      expect(result.length).toBe(7);
+      expect(result.map((m) => m.id)).toContain('gpt-5.6-sol');
+      expect(result.map((m) => m.id)).toContain('gpt-5.6-terra');
+      expect(result.map((m) => m.id)).toContain('gpt-5.6-luna');
       expect(result.map((m) => m.id)).toContain('gpt-5.5');
       expect(result.map((m) => m.id)).toContain('gpt-5.4');
       expect(result.map((m) => m.id)).toContain('gpt-5.4-mini');
@@ -2683,9 +2900,12 @@ describe('ModelDiscoveryService', () => {
 
       const result = supplementWithKnownModels(raw, 'openai');
 
-      // 1 discovered + 4 ChatGPT-account supported knownModels
-      expect(result.length).toBe(5);
+      // 1 discovered + 7 ChatGPT-account supported knownModels
+      expect(result.length).toBe(8);
       expect(result[0].id).toBe('gpt-oss-120b');
+      expect(result.map((m) => m.id)).toContain('gpt-5.6-sol');
+      expect(result.map((m) => m.id)).toContain('gpt-5.6-terra');
+      expect(result.map((m) => m.id)).toContain('gpt-5.6-luna');
       expect(result.map((m) => m.id)).toContain('gpt-5.5');
       expect(result.map((m) => m.id)).toContain('gpt-5.4');
       expect(result.map((m) => m.id)).toContain('gpt-5.4-mini');
@@ -3138,6 +3358,165 @@ describe('ModelDiscoveryService', () => {
   /* ── models.dev fallback in discoverModels ── */
 
   describe('models.dev fallback in discoverModels', () => {
+    it('uses the live OpenCode Go catalog before models.dev fallback', async () => {
+      mockModelsDevSync.getModelsForProvider.mockImplementation((providerId: string) =>
+        providerId === 'opencode-go'
+          ? [
+              {
+                id: 'glm-5.2',
+                name: 'GLM-5.2',
+                contextWindow: 1000000,
+                inputPricePerToken: 0.0000014,
+                outputPricePerToken: 0.0000044,
+                reasoning: true,
+                toolCall: true,
+              },
+            ]
+          : [],
+      );
+      fetcher.fetch.mockResolvedValue([
+        makeModel({
+          id: 'opencode-go/glm-5.2',
+          displayName: 'opencode-go/glm-5.2',
+          provider: 'opencode-go',
+          contextWindow: 200000,
+          inputPricePerToken: 0,
+          outputPricePerToken: 0,
+          capabilityReasoning: true,
+          capabilityCode: true,
+        }),
+      ]);
+
+      const result = await service.discoverModels(
+        makeProvider({ provider: 'opencode-go', auth_type: 'subscription' }),
+      );
+
+      expect(fetcher.fetch).toHaveBeenCalledWith(
+        'opencode-go',
+        'decrypted-key',
+        'subscription',
+        undefined,
+      );
+      expect(mockModelsDevSync.getModelsForProvider).not.toHaveBeenCalledWith('opencode-go');
+      expect(result).toHaveLength(1);
+      expect(result[0]).toEqual(
+        expect.objectContaining({
+          id: 'opencode-go/glm-5.2',
+          displayName: 'opencode-go/glm-5.2',
+          provider: 'opencode-go',
+          contextWindow: 200000,
+          inputPricePerToken: 0,
+          outputPricePerToken: 0,
+          capabilityReasoning: true,
+          capabilityCode: true,
+        }),
+      );
+    });
+
+    it('uses models.dev as the primary OpenCode Zen catalog and preserves token pricing', async () => {
+      mockModelsDevSync.getModelsForProvider.mockImplementation((providerId: string) =>
+        providerId === 'opencode-zen'
+          ? [
+              {
+                id: 'ring-2.6-1t-free',
+                name: 'Ring 2.6 1T Free',
+                contextWindow: 200000,
+                inputPricePerToken: 0.000001,
+                outputPricePerToken: 0.000002,
+                reasoning: true,
+                toolCall: true,
+              },
+            ]
+          : [],
+      );
+
+      const result = await service.discoverModels(makeProvider({ provider: 'opencode-zen' }));
+
+      expect(fetcher.fetch).not.toHaveBeenCalled();
+      expect(mockModelsDevSync.getModelsForProvider).toHaveBeenCalledWith('opencode-zen');
+      expect(result).toHaveLength(1);
+      expect(result[0]).toEqual(
+        expect.objectContaining({
+          id: 'opencode-zen/ring-2.6-1t-free',
+          displayName: 'Ring 2.6 1T Free',
+          provider: 'opencode-zen',
+          contextWindow: 200000,
+          inputPricePerToken: 0.000001,
+          outputPricePerToken: 0.000002,
+          capabilityReasoning: true,
+          capabilityCode: true,
+        }),
+      );
+    });
+
+    it('refreshes metadata and fetches live OpenCode Go models on forced refresh', async () => {
+      fetcher.fetch.mockResolvedValue([
+        makeModel({
+          id: 'opencode-go/glm-5.2',
+          provider: 'opencode-go',
+          inputPricePerToken: 0,
+          outputPricePerToken: 0,
+        }),
+      ]);
+
+      await service.discoverModels(
+        makeProvider({ provider: 'opencode-go', auth_type: 'subscription' }),
+        { forceRefresh: true },
+      );
+
+      expect(mockModelsDevSync.refreshCache).toHaveBeenCalledTimes(1);
+      expect(fetcher.fetch).toHaveBeenCalledWith(
+        'opencode-go',
+        'decrypted-key',
+        'subscription',
+        undefined,
+        { forceRefresh: true },
+      );
+    });
+
+    it('falls back to the OpenCode Go docs catalog when forced models.dev refresh fails', async () => {
+      const warnSpy = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+      mockModelsDevSync.refreshCache.mockRejectedValue(new Error('models.dev unavailable'));
+      fetcher.fetch.mockResolvedValue([makeModel({ id: 'opencode-go/glm-5.2' })]);
+
+      const result = await service.discoverModels(
+        makeProvider({ provider: 'opencode-go', auth_type: 'subscription' }),
+        { forceRefresh: true },
+      );
+
+      expect(mockModelsDevSync.refreshCache).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        'models.dev refresh failed during manual model discovery: models.dev unavailable',
+      );
+      expect(fetcher.fetch).toHaveBeenCalledWith(
+        'opencode-go',
+        'decrypted-key',
+        'subscription',
+        undefined,
+        { forceRefresh: true },
+      );
+      expect(result[0].id).toBe('opencode-go/glm-5.2');
+
+      warnSpy.mockRestore();
+    });
+
+    it('uses the OpenCode Go provider fetch when models.dev has no catalog entry', async () => {
+      fetcher.fetch.mockResolvedValue([makeModel({ id: 'opencode-go/glm-5.1' })]);
+
+      const result = await service.discoverModels(
+        makeProvider({ provider: 'opencode-go', auth_type: 'subscription' }),
+      );
+
+      expect(mockModelsDevSync.getModelsForProvider).not.toHaveBeenCalledWith('opencode-go');
+      expect(fetcher.fetch).toHaveBeenCalledWith(
+        'opencode-go',
+        'decrypted-key',
+        'subscription',
+        undefined,
+      );
+      expect(result[0].id).toBe('opencode-go/glm-5.1');
+    });
+
     it('should try models.dev before OpenRouter when native API returns empty', async () => {
       fetcher.fetch.mockResolvedValue([]);
       mockModelsDevSync.getModelsForProvider.mockReturnValue([

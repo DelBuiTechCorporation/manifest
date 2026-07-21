@@ -2,6 +2,7 @@ import {
   initSseHeaders,
   pipePassthrough,
   pipeStream,
+  UpstreamStreamError,
   extractUsageFromSse,
   parseUsageObject,
 } from '../stream-writer';
@@ -462,11 +463,10 @@ describe('pipeStream', () => {
       },
     });
 
-    await expect(pipeStream(stream, res as never)).rejects.toThrow('stream read error');
+    await expect(pipeStream(stream, res as never)).rejects.toBeInstanceOf(UpstreamStreamError);
 
-    // After error, the reader lock should be released (finally block runs).
-    // We verify by checking that end was called (finally block behavior).
-    expect(res.end).toHaveBeenCalled();
+    expect(stream.locked).toBe(false);
+    expect(res.end).not.toHaveBeenCalled();
   });
 
   it('should not write remaining whitespace-only buffer through transform', async () => {
@@ -981,6 +981,22 @@ describe('pipePassthrough', () => {
       'SSE buffer overflow',
     );
   });
+
+  it('leaves the destination open when the upstream reader fails', async () => {
+    const { res } = mockResponse();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error('upstream disconnected'));
+      },
+    });
+
+    await expect(pipePassthrough(stream, res as never, () => null)).rejects.toBeInstanceOf(
+      UpstreamStreamError,
+    );
+
+    expect(stream.locked).toBe(false);
+    expect(res.end).not.toHaveBeenCalled();
+  });
 });
 
 describe('parseUsageObject', () => {
@@ -1007,6 +1023,70 @@ describe('parseUsageObject', () => {
       completion_tokens: 5,
       cache_read_tokens: 4,
       cache_creation_tokens: undefined,
+    });
+  });
+
+  it('maps Moonshot top-level cached_tokens to cache reads', () => {
+    expect(
+      parseUsageObject({
+        prompt_tokens: 100,
+        completion_tokens: 5,
+        cached_tokens: 40,
+      }),
+    ).toEqual({
+      prompt_tokens: 100,
+      completion_tokens: 5,
+      cache_read_tokens: 40,
+      cache_creation_tokens: undefined,
+    });
+  });
+
+  it('maps DeepSeek prompt cache hit tokens to cache reads', () => {
+    expect(
+      parseUsageObject({
+        prompt_tokens: 120,
+        completion_tokens: 8,
+        prompt_cache_hit_tokens: 90,
+        prompt_cache_miss_tokens: 30,
+      }),
+    ).toEqual({
+      prompt_tokens: 120,
+      completion_tokens: 8,
+      cache_read_tokens: 90,
+      cache_creation_tokens: undefined,
+    });
+  });
+
+  it('preserves provider-reported OpenAI-compatible usage cost', () => {
+    expect(
+      parseUsageObject({
+        prompt_tokens: 16,
+        completion_tokens: 1,
+        cost: 0.00005,
+        cost_details: { upstream_inference_cost: 0.00000435 },
+      }),
+    ).toEqual({
+      prompt_tokens: 16,
+      completion_tokens: 1,
+      cache_read_tokens: undefined,
+      cache_creation_tokens: undefined,
+      reported_cost_usd: 0.00005,
+    });
+  });
+
+  it('falls back to upstream inference cost when top-level cost is absent', () => {
+    expect(
+      parseUsageObject({
+        prompt_tokens: 16,
+        completion_tokens: 1,
+        cost_details: { upstream_inference_cost: 0.00000435 },
+      }),
+    ).toEqual({
+      prompt_tokens: 16,
+      completion_tokens: 1,
+      cache_read_tokens: undefined,
+      cache_creation_tokens: undefined,
+      reported_cost_usd: 0.00000435,
     });
   });
 

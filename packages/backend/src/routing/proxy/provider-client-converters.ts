@@ -5,6 +5,7 @@ import {
   type GoogleStreamChunkResult,
 } from './google-adapter';
 import {
+  applyAnthropicAutomaticCacheControl,
   applyAnthropicMessagesMutations,
   extractThinkingBlocksFromMessagesResponse,
   toAnthropicRequest,
@@ -74,6 +75,7 @@ export function createAnthropicTransformer(
 
 // Re-export adapter functions used by ProviderClient.forward()
 export {
+  applyAnthropicAutomaticCacheControl,
   applyAnthropicMessagesMutations,
   extractThinkingBlocksFromMessagesResponse,
   toGoogleRequest,
@@ -107,6 +109,7 @@ const OPENAI_ONLY_FIELDS = new Set([
  * Nested message fields may still need target-aware cleanup.
  */
 const PASSTHROUGH_PROVIDERS = new Set(['openai', 'openrouter']);
+const OLLAMA_ENDPOINTS = new Set(['ollama', 'ollama-cloud']);
 const MISTRAL_TOOL_CALL_ID_REGEX = /^[A-Za-z0-9]{9}$/;
 const DEEPSEEK_MAX_TOKENS_LIMIT = 8192;
 
@@ -304,25 +307,31 @@ function sanitizeOpenAiMessages(
     if (!preserveReasoningContent) {
       delete cleaned.reasoning_content;
     }
+    if (endpointKey !== 'openrouter') {
+      delete cleaned.reasoning;
+    }
+    delete cleaned.reasoning_text;
     if (!preserveReasoningDetails) {
       delete cleaned.reasoning_details;
     }
 
     if (
       preserveReasoningContent &&
-      !cleaned.reasoning_content &&
       Array.isArray(cleaned.tool_calls) &&
       cleaned.tool_calls.length > 0 &&
-      reasoningContentLookup
+      !hasNonEmptyReasoningContent(cleaned)
     ) {
       const firstToolCall = cleaned.tool_calls[0];
       const firstToolCallId =
         firstToolCall && typeof firstToolCall === 'object' && !Array.isArray(firstToolCall)
           ? (firstToolCall as Record<string, unknown>).id
           : undefined;
-      if (typeof firstToolCallId === 'string') {
+      if (reasoningContentLookup && typeof firstToolCallId === 'string') {
         const cached = reasoningContentLookup(firstToolCallId);
         if (cached) cleaned.reasoning_content = cached;
+      }
+      if (!hasNonEmptyReasoningContent(cleaned)) {
+        cleaned.reasoning_content = '';
       }
     }
 
@@ -343,6 +352,10 @@ function sanitizeOpenAiMessages(
 
     return cleaned;
   });
+}
+
+function hasNonEmptyReasoningContent(message: Record<string, unknown>): boolean {
+  return typeof message.reasoning_content === 'string' && message.reasoning_content.length > 0;
 }
 
 function normalizeDeepSeekMaxTokens(body: Record<string, unknown>): void {
@@ -425,9 +438,14 @@ export function sanitizeOpenAiBody(
       cleaned[key] = value;
       continue;
     }
+    if (key === 'reasoning_effort' && endpointKey === 'xai') {
+      cleaned[key] = value;
+      continue;
+    }
     if (OPENAI_ONLY_FIELDS.has(key) && !(keepReasoningEffort && key === 'reasoning_effort')) {
       continue;
     }
+    if (key === 'thinking' && OLLAMA_ENDPOINTS.has(endpointKey.toLowerCase())) continue;
     if (key === 'max_completion_tokens') {
       // Preserve max_completion_tokens for endpoints that require it; otherwise
       // downconvert to max_tokens for OpenAI-compatible providers that only know

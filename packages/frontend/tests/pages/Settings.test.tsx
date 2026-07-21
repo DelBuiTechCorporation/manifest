@@ -7,6 +7,7 @@ vi.mock("@solidjs/router", () => ({
   useParams: () => ({ agentName: mockAgentName }),
   useNavigate: () => mockNavigate,
   useLocation: () => ({ pathname: `/harnesses/${mockAgentName}/settings`, state: null }),
+  useSearchParams: () => [{}],
 }));
 
 vi.mock("@solidjs/meta", () => ({
@@ -20,6 +21,8 @@ const mockDeleteAgent = vi.fn();
 const mockRenameAgent = vi.fn();
 const mockRotateAgentKey = vi.fn();
 const mockUpdateAgent = vi.fn();
+const mockGetAutofix = vi.fn(() => Promise.resolve({ enabled: false, available: true }));
+const mockUpdateAutofix = vi.fn(() => Promise.resolve({ enabled: false, available: true }));
 vi.mock("../../src/services/api.js", () => ({
   getAgentKey: (...args: unknown[]) => mockGetAgentKey(...args),
   getAgentInfo: (...args: unknown[]) => mockGetAgentInfo(...args),
@@ -27,6 +30,8 @@ vi.mock("../../src/services/api.js", () => ({
   renameAgent: (...args: unknown[]) => mockRenameAgent(...args),
   rotateAgentKey: (...args: unknown[]) => mockRotateAgentKey(...args),
   updateAgent: (...args: unknown[]) => mockUpdateAgent(...args),
+  getAutofix: (...args: unknown[]) => mockGetAutofix(...args),
+  updateAutofix: (...args: unknown[]) => mockUpdateAutofix(...args),
 }));
 
 vi.mock("../../src/services/toast-store.js", () => ({

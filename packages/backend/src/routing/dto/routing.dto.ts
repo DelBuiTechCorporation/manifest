@@ -1,3 +1,4 @@
+import type { AuthType } from 'manifest-shared';
 import {
   IsString,
   IsIn,
@@ -9,6 +10,7 @@ import {
   MaxLength,
   ArrayMinSize,
   ValidateNested,
+  IsBoolean,
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 
@@ -72,11 +74,19 @@ export class ConnectProviderDto {
 
   @IsOptional()
   @IsIn(AUTH_TYPES)
-  authType?: 'api_key' | 'subscription';
+  authType?: AuthType;
 
   @IsOptional()
   @IsString()
   region?: string;
+
+  @IsOptional()
+  @IsString()
+  baseUrl?: string;
+
+  @IsOptional()
+  @IsString()
+  base_url?: string;
 
   @IsOptional()
   @IsString()
@@ -218,4 +228,10 @@ export class SetResponseModeDto {
 
 export function responseModeFromDto(body: SetResponseModeDto): ResponseMode | undefined {
   return body.response_mode ?? body.responseMode;
+}
+
+export class UpdateAutofixDto {
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
 }

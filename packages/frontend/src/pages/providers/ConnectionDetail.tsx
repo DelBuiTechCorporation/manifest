@@ -1,6 +1,7 @@
 import { Title } from '@solidjs/meta';
 import { toggleScrollFade } from '../../services/scroll-fade.js';
 import { A, useNavigate, useParams } from '@solidjs/router';
+import { getBillingStatus } from '../../services/api/billing.js';
 import {
   createEffect,
   createMemo,
@@ -17,7 +18,17 @@ import {
   getPerAgentTimeseries,
   getPerAgentMessageTimeseries,
   getPerAgentCostTimeseries,
+  getConnectionAttemptStatusTimeseries,
+  getConnectionAttemptsByAgentTimeseries,
+  getConnectionAttemptHttpStatusTimeseries,
+  getConnectionAttemptBreakdown,
+  attemptSuccessRate,
+  totalAttemptsTooltip,
+  CONNECTION_SUCCESS_RATE_TOOLTIP,
+  CONNECTION_HARNESS_SUCCESS_RATE_TOOLTIP,
 } from '../../services/api/analytics.js';
+import { getAutofixCohort } from '../../services/api/autofix.js';
+import { messagePing } from '../../services/sse.js';
 import { platformIcon } from 'manifest-shared';
 import { PROVIDERS } from '../../services/providers.js';
 import { providerIcon } from '../../components/ProviderIcon.jsx';
@@ -30,12 +41,12 @@ import {
 } from '../../services/formatters.js';
 import { getAgents, getCustomProviders as fetchCustomProviders } from '../../services/api.js';
 import {
-  getProviders as getAgentProviders,
   renameProviderKey,
   disconnectProvider,
   refreshModels,
 } from '../../services/api/routing.js';
-import ProviderChartCard from '../../components/ProviderChartCard.jsx';
+import UnifiedChartCard, { type ChartTab } from '../../components/UnifiedChartCard.jsx';
+import InfoTooltip from '../../components/InfoTooltip.jsx';
 import { AGENT_COLORS } from '../../components/MultiAgentTokenChart.jsx';
 import Select from '../../components/Select.jsx';
 import { setConnectionBreadcrumb } from '../../services/connection-breadcrumb-store.js';
@@ -64,6 +75,8 @@ interface AgentRow {
   tokens_30d: number;
   cost_30d: number;
   messages_30d: number;
+  attempts_30d?: number;
+  succeeded_30d?: number;
   pct_of_total: number;
   last_used: string | null;
 }
@@ -102,11 +115,40 @@ interface AnalyticsResponse {
   };
   token_usage: Array<{ hour?: string; date?: string; input_tokens: number; output_tokens: number }>;
   message_usage: Array<{ hour?: string; date?: string; count: number }>;
+  attempts: { total: number; successful: number; success_rate: number };
 }
+
+const PRO_RANGES_CD = new Set(['30d', '90d', '365d']);
+const CD_RANGE_OPTIONS = [
+  { label: 'Last 24 hours', value: '24h' },
+  { label: 'Last 7 days', value: '7d' },
+  { label: 'Last 30 days', value: '30d' },
+  { label: 'Last 90 days', value: '90d' },
+  { label: 'Last 365 days', value: '365d' },
+];
 
 const ConnectionDetail: Component = () => {
   const params = useParams<{ connectionId: string }>();
   const navigate = useNavigate();
+  const [billing] = createResource(async () => {
+    try {
+      return await getBillingStatus();
+    } catch {
+      return null;
+    }
+  });
+  const isFreePlan = () => billing()?.enabled && billing()?.plan === 'free';
+  const proBadge = () => (
+    <span class="pro-range-badge" aria-label="Pro plan required">
+      PRO
+    </span>
+  );
+  const cdRangeOptions = () =>
+    CD_RANGE_OPTIONS.map((opt) =>
+      isFreePlan() && PRO_RANGES_CD.has(opt.value)
+        ? { ...opt, disabled: true, badge: proBadge() }
+        : opt,
+    );
 
   const [detail, { refetch: refetchDetail }] = createResource(
     () => params.connectionId,
@@ -143,6 +185,12 @@ const ConnectionDetail: Component = () => {
     return conn()?.provider ?? '';
   };
 
+  // Deep links into the Requests log, scoped to THIS connection and the
+  // card's current window, so the list matches what the card counted.
+  const requestsLink = (extra: string) =>
+    `/messages?connections=${encodeURIComponent(params.connectionId)}&range=${chartRange()}${extra}`;
+  const viewMore = () => <span class="view-more-link">View more</span>;
+
   const backLink = () =>
     BACK_LINKS[conn()?.auth_type ?? 'subscription'] ?? '/providers/subscriptions';
   const backLabel = () => AUTH_TYPE_LABELS[conn()?.auth_type ?? 'subscription'] ?? 'Providers';
@@ -162,9 +210,9 @@ const ConnectionDetail: Component = () => {
   const savedRange = () => {
     try {
       const v = sessionStorage.getItem(rangeKey());
-      // Restore any persisted range, including '24h' (previously dropped, so a
-      // saved 24h selection silently reset to the 7d default on reload).
-      if (v === '24h' || v === '7d' || v === '30d') return v;
+      // Restore any persisted range, including longer windows, so saved
+      // selections survive reload instead of silently resetting to the 7d default.
+      if (v === '24h' || v === '7d' || v === '30d' || v === '90d' || v === '365d') return v;
     } catch {
       /* ignore */
     }
@@ -173,7 +221,7 @@ const ConnectionDetail: Component = () => {
   const savedView = () => {
     try {
       const v = sessionStorage.getItem(viewKey());
-      if (v === 'messages' || v === 'cost') return v;
+      if (v === 'tokens' || v === 'cost' || v === 'requests') return v;
     } catch {
       /* ignore */
     }
@@ -188,8 +236,8 @@ const ConnectionDetail: Component = () => {
       /* ignore */
     }
   };
-  const [chartView, setChartViewRaw] = createSignal<'messages' | 'tokens' | 'cost'>(savedView());
-  const setChartView = (v: 'messages' | 'tokens' | 'cost') => {
+  const [chartView, setChartViewRaw] = createSignal<ChartTab>(savedView());
+  const setChartView = (v: ChartTab) => {
     setChartViewRaw(v);
     try {
       sessionStorage.setItem(viewKey(), v);
@@ -198,6 +246,27 @@ const ConnectionDetail: Component = () => {
     }
   };
   const [chartAgent] = createSignal('');
+
+  // Attempts tab view: By attempt status (default) or By harness. Persisted
+  // per connection like the range and the active tab.
+  const groupKey = () => `chart-group:${params.connectionId}`;
+  const savedGroup = (): 'status' | 'http' | 'harness' => {
+    try {
+      const v = sessionStorage.getItem(groupKey());
+      return v === 'harness' || v === 'status' ? v : 'http';
+    } catch {
+      return 'http';
+    }
+  };
+  const [groupBy, setGroupByRaw] = createSignal<'status' | 'http' | 'harness'>(savedGroup());
+  const setGroupBy = (v: 'status' | 'http' | 'harness') => {
+    setGroupByRaw(v);
+    try {
+      sessionStorage.setItem(groupKey(), v);
+    } catch {
+      /* ignore */
+    }
+  };
 
   const [analytics] = createResource(
     () => {
@@ -259,6 +328,93 @@ const ConnectionDetail: Component = () => {
     },
   );
 
+  // Attempt world: every provider call on this connection, by its own
+  // outcome. Default view of the Attempts chart; the harness view shares the
+  // same universe so both stack to the same totals.
+  const [attemptStatusTs] = createResource(
+    () => {
+      const c = conn();
+      if (!c) return null;
+      return { range: chartRange(), authType: c.auth_type, provider: c.provider, label: c.label };
+    },
+    (p) => {
+      if (!p) return null;
+      return getConnectionAttemptStatusTimeseries(
+        p.authType,
+        p.provider,
+        p.range,
+        p.label,
+        params.connectionId,
+      );
+    },
+  );
+  const [attemptsByAgentTs] = createResource(
+    () => {
+      const c = conn();
+      if (!c) return null;
+      return { range: chartRange(), authType: c.auth_type, provider: c.provider, label: c.label };
+    },
+    (p) => {
+      if (!p) return null;
+      return getConnectionAttemptsByAgentTimeseries(
+        p.authType,
+        p.provider,
+        p.range,
+        p.label,
+        params.connectionId,
+      );
+    },
+  );
+  const [httpStatusTs] = createResource(
+    () => {
+      const c = conn();
+      if (!c) return null;
+      return { range: chartRange(), authType: c.auth_type, provider: c.provider, label: c.label };
+    },
+    (p) => {
+      if (!p) return null;
+      return getConnectionAttemptHttpStatusTimeseries(
+        p.authType,
+        p.provider,
+        p.range,
+        p.label,
+        params.connectionId,
+      );
+    },
+  );
+  const [breakdown] = createResource(
+    () => {
+      const c = conn();
+      if (!c) return null;
+      return { range: chartRange(), authType: c.auth_type, provider: c.provider, label: c.label };
+    },
+    (p) => {
+      if (!p) return null;
+      return getConnectionAttemptBreakdown(
+        p.authType,
+        p.provider,
+        p.range,
+        p.label,
+        params.connectionId,
+      );
+    },
+  );
+
+  const attemptTotals = () => {
+    const ts = attemptStatusTs();
+    if (!ts) return { attempts: 0, succeeded: 0 };
+    const successIdx = ts.keys.indexOf('success');
+    let attempts = 0;
+    let succeeded = 0;
+    for (const b of ts.buckets) {
+      for (let i = 0; i < b.counts.length; i++) {
+        attempts += b.counts[i] ?? 0;
+        if (i === successIdx) succeeded += b.counts[i] ?? 0;
+      }
+    }
+    return { attempts, succeeded };
+  };
+
   const isByok = () => conn()?.auth_type === 'api_key';
 
   const [agentCostTimeseries] = createResource(
@@ -279,6 +435,12 @@ const ConnectionDetail: Component = () => {
     },
   );
 
+  // ── Auto-fix resources (workspace-level, conditional on availability) ──
+  const [autofixCohort] = createResource(
+    () => ({ _ping: messagePing() }),
+    () => getAutofixCohort(),
+  );
+  const autofixEligible = () => autofixCohort()?.eligible ?? false;
   // Harness tag selection for chart filtering (persisted in sessionStorage).
   // `null` means "no persisted preference" (→ default to all selected); a Set
   // — even an empty one — means an explicit user choice, so a genuine
@@ -307,7 +469,8 @@ const ConnectionDetail: Component = () => {
     const tokenAgents = agentTimeseries()?.agents ?? [];
     const msgAgents = agentMessageTimeseries()?.agents ?? [];
     const costAgents = agentCostTimeseries()?.agents ?? [];
-    const set = new Set([...tokenAgents, ...msgAgents, ...costAgents]);
+    const attemptAgents = attemptsByAgentTs()?.agents ?? [];
+    const set = new Set([...tokenAgents, ...msgAgents, ...costAgents, ...attemptAgents]);
     return [...set].sort();
   });
 
@@ -359,6 +522,7 @@ const ConnectionDetail: Component = () => {
   const filteredAgentTimeseries = createMemo(() => filterSeries(agentTimeseries()));
   const filteredAgentMessageTimeseries = createMemo(() => filterSeries(agentMessageTimeseries()));
   const filteredAgentCostTimeseries = createMemo(() => filterSeries(agentCostTimeseries()));
+  const filteredAttemptsByAgentTimeseries = createMemo(() => filterSeries(attemptsByAgentTs()));
 
   // Manage modal state
   const [showManageModal, setShowManageModal] = createSignal(false);
@@ -366,6 +530,9 @@ const ConnectionDetail: Component = () => {
   const [renaming, setRenaming] = createSignal(false);
   const [renameError, setRenameError] = createSignal('');
   const [refreshingModels, setRefreshingModels] = createSignal(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = createSignal(false);
+  const [deleteConfirmName, setDeleteConfirmName] = createSignal('');
+  const [deletingConnection, setDeletingConnection] = createSignal(false);
   const [agents] = createResource(async () => {
     try {
       const res = await getAgents();
@@ -380,7 +547,30 @@ const ConnectionDetail: Component = () => {
     const c = conn();
     if (c) setRenameValue(c.label);
     setRenameError('');
+    setShowDeleteConfirm(false);
+    setDeleteConfirmName('');
     setShowManageModal(true);
+  };
+
+  const closeManageModal = () => {
+    setShowManageModal(false);
+    setShowDeleteConfirm(false);
+    setDeleteConfirmName('');
+  };
+
+  const openDeleteConfirm = () => {
+    setDeleteConfirmName('');
+    setShowDeleteConfirm(true);
+  };
+
+  const closeDeleteConfirm = () => {
+    setShowDeleteConfirm(false);
+    setDeleteConfirmName('');
+  };
+
+  const deleteConfirmMatches = () => {
+    const c = conn();
+    return !!c && deleteConfirmName() === c.label;
   };
 
   const handleRename = async () => {
@@ -396,7 +586,7 @@ const ConnectionDetail: Component = () => {
       return;
     }
     if (newLabel === c.label) {
-      setShowManageModal(false);
+      closeManageModal();
       return;
     }
     setRenaming(true);
@@ -404,7 +594,7 @@ const ConnectionDetail: Component = () => {
     try {
       await renameProviderKey(firstAgentName(), c.provider, c.label, newLabel, c.auth_type as any);
       toast.success('Connection renamed');
-      setShowManageModal(false);
+      closeManageModal();
       refetchDetail();
     } catch (e: any) {
       setRenameError(e?.message ?? 'Failed to rename');
@@ -416,17 +606,23 @@ const ConnectionDetail: Component = () => {
   const handleDisconnect = async () => {
     const c = conn();
     if (!c) return;
+    if (!c.is_active && !deleteConfirmMatches()) return;
     const agent = firstAgentName();
     if (!agent) {
-      toast.error('Create at least one harness before disconnecting a provider.');
+      toast.error(
+        `Create at least one harness before ${c.is_active ? 'disconnecting' : 'deleting'} a provider.`,
+      );
       return;
     }
+    setDeletingConnection(true);
     try {
       await disconnectProvider(agent, c.provider, c.auth_type as any, c.label);
       toast.success('Connection removed');
       navigate(backLink());
     } catch (e: any) {
       toast.error(e?.message ?? 'Failed to disconnect');
+    } finally {
+      setDeletingConnection(false);
     }
   };
 
@@ -614,17 +810,110 @@ const ConnectionDetail: Component = () => {
                   </Show>
                   <Select
                     value={chartRange()}
-                    onChange={setChartRange}
-                    options={[
-                      { label: 'Last 24 hours', value: '24h' },
-                      { label: 'Last 7 days', value: '7d' },
-                      { label: 'Last 30 days', value: '30d' },
-                    ]}
+                    onChange={(v) => {
+                      if (isFreePlan() && PRO_RANGES_CD.has(v)) return;
+                      setChartRange(v);
+                    }}
+                    options={cdRangeOptions()}
                   />
                   <button class="btn btn--outline btn--sm" onClick={openManageModal}>
                     Manage
                   </button>
                 </div>
+              </div>
+
+              {/* Attempt world cards: the connection's own numbers on the
+                  filtered period. Fallback retries exist for everyone;
+                  auto-fixed attempts only exist with the Doctor version. */}
+              <div
+                class="overview-stats"
+                style={`grid-template-columns: repeat(${autofixEligible() ? 5 : 4}, 1fr); margin-bottom: 16px;`}
+              >
+                <div class="overview-stat-card">
+                  <span class="overview-stat-card__label">
+                    Success rate
+                    <InfoTooltip text={CONNECTION_SUCCESS_RATE_TOOLTIP} />
+                  </span>
+                  <div class="overview-stat-card__value-row">
+                    <span class="overview-stat-card__value">
+                      {(() => {
+                        const b = breakdown();
+                        const rate = b
+                          ? attemptSuccessRate({ attempts: b.attempts, succeeded: b.succeeded })
+                          : null;
+                        return rate == null ? '—' : `${(rate * 100).toFixed(1)}%`;
+                      })()}
+                    </span>
+                  </div>
+                </div>
+                <div
+                  class="overview-stat-card"
+                  style="cursor: pointer;"
+                  title="View the requests holding these succeeded attempts"
+                  onClick={() => navigate(requestsLink('&attempts=has_succeeded'))}
+                >
+                  <span class="overview-stat-card__label">Succeeded attempts</span>
+                  <div class="overview-stat-card__value-row">
+                    <span class="overview-stat-card__value">
+                      {formatNumber(breakdown()?.succeeded ?? 0)}
+                    </span>
+                    {viewMore()}
+                  </div>
+                </div>
+                <div
+                  class="overview-stat-card"
+                  style="cursor: pointer;"
+                  title="View the requests holding these failed attempts"
+                  onClick={() => navigate(requestsLink('&attempts=has_failed'))}
+                >
+                  <span class="overview-stat-card__label">Failed attempts</span>
+                  <div class="overview-stat-card__value-row">
+                    <span class="overview-stat-card__value">
+                      {formatNumber(breakdown()?.failed ?? 0)}
+                    </span>
+                    {viewMore()}
+                  </div>
+                </div>
+                <div
+                  class="overview-stat-card"
+                  style="cursor: pointer;"
+                  title="View the requests where this connection ran a fallback retry"
+                  onClick={() => navigate(requestsLink('&trigger=fallback'))}
+                >
+                  <span class="overview-stat-card__label">Fallback retries</span>
+                  <div class="overview-stat-card__value-row">
+                    <span class="overview-stat-card__value">
+                      {formatNumber(breakdown()?.fallback_retries ?? 0)}
+                    </span>
+                    <Show when={(breakdown()?.fallback_retries ?? 0) > 0}>
+                      <span style="color: hsl(var(--muted-foreground)); font-size: var(--font-size-xs);">
+                        {formatNumber(breakdown()?.fallback_retries_succeeded ?? 0)} succeeded
+                      </span>
+                    </Show>
+                    {viewMore()}
+                  </div>
+                </div>
+                <Show when={autofixEligible()}>
+                  <div
+                    class="overview-stat-card"
+                    style="cursor: pointer;"
+                    title="View the requests where this connection ran an auto-fixed attempt"
+                    onClick={() => navigate(requestsLink('&trigger=autofix'))}
+                  >
+                    <span class="overview-stat-card__label">Auto-fixed attempts</span>
+                    <div class="overview-stat-card__value-row">
+                      <span class="overview-stat-card__value">
+                        {formatNumber(breakdown()?.autofix_attempts ?? 0)}
+                      </span>
+                      <Show when={(breakdown()?.autofix_attempts ?? 0) > 0}>
+                        <span style="color: hsl(var(--muted-foreground)); font-size: var(--font-size-xs);">
+                          {formatNumber(breakdown()?.autofix_attempts_succeeded ?? 0)} succeeded
+                        </span>
+                      </Show>
+                      {viewMore()}
+                    </div>
+                  </div>
+                </Show>
               </div>
 
               {/* Chart */}
@@ -640,39 +929,102 @@ const ConnectionDetail: Component = () => {
                     return sum;
                   });
                   return (
-                    <ProviderChartCard
-                      activeView={chartView()}
-                      onViewChange={setChartView}
-                      messagesValue={analytics()!.summary.messages.value}
-                      messagesTrendPct={analytics()!.summary.messages.trend_pct}
+                    <UnifiedChartCard
+                      activeTab={chartView()}
+                      onTabChange={setChartView}
+                      requestsLabel="Attempts"
+                      requestsInfoTooltip={totalAttemptsTooltip(autofixEligible())}
+                      requestsValue={attemptTotals().attempts}
+                      requestsTrendPct={0}
                       tokensValue={analytics()!.summary.tokens.value}
                       tokensTrendPct={analytics()!.summary.tokens.trend_pct}
                       costValue={isByok() ? (totalCost() ?? 0) : undefined}
                       range={chartRange()}
                       agentTimeseries={filteredAgentTimeseries() ?? undefined}
-                      agentMessageTimeseries={filteredAgentMessageTimeseries() ?? undefined}
+                      agentRequestTimeseries={
+                        groupBy() === 'harness' ? filteredAttemptsByAgentTimeseries() : undefined
+                      }
+                      requestStatusTimeseries={
+                        groupBy() === 'status'
+                          ? (attemptStatusTs() ?? undefined)
+                          : groupBy() === 'http'
+                            ? (httpStatusTs() ?? undefined)
+                            : undefined
+                      }
+                      requestStatusSeriesMode={groupBy() === 'http' ? 'http_status' : 'disposition'}
                       agentCostTimeseries={
                         isByok() ? (filteredAgentCostTimeseries() ?? undefined) : undefined
                       }
                       colorMap={agentColorMap()}
+                      seriesFilters={
+                        <>
+                          {/* Status/harness grouping only applies to the
+                              Requests tab; Tokens and Cost stay per-harness. */}
+                          <Show when={chartView() === 'requests'}>
+                            <button
+                              class="chart-card__filter-btn"
+                              classList={{
+                                'chart-card__filter-btn--active': groupBy() === 'http',
+                              }}
+                              onClick={() => setGroupBy('http')}
+                            >
+                              By HTTP status
+                            </button>
+                            <button
+                              class="chart-card__filter-btn"
+                              classList={{
+                                'chart-card__filter-btn--active': groupBy() === 'status',
+                              }}
+                              onClick={() => setGroupBy('status')}
+                            >
+                              By attempt status
+                            </button>
+                            <button
+                              class="chart-card__filter-btn"
+                              classList={{
+                                'chart-card__filter-btn--active': groupBy() === 'harness',
+                              }}
+                              onClick={() => setGroupBy('harness')}
+                            >
+                              By harness
+                            </button>
+                          </Show>
+                          <Show
+                            when={
+                              (chartView() !== 'requests' || groupBy() === 'harness') &&
+                              allAgents().length > 1
+                            }
+                          >
+                            <FilterSelect
+                              noun="harnesses"
+                              items={allAgents()}
+                              selected={effectiveSelected()}
+                              colorMap={agentColorMap()}
+                              onToggle={toggleAgent}
+                              onSelectAll={() => persistSelection(new Set(allAgents()))}
+                              onUnselectAll={() => persistSelection(new Set<string>())}
+                            />
+                          </Show>
+                        </>
+                      }
                     />
                   );
                 })()}
               </Show>
 
-              {/* Recent Messages (full width) */}
+              {/* Recent Requests (full width) */}
               <div class="panel scroll-panel" style="margin-bottom: 24px;">
                 <div
                   class="panel__title"
                   style="display: flex; justify-content: space-between; align-items: center;"
                 >
-                  Recent Messages
+                  Recent Requests
                 </div>
                 <Show
                   when={detail()!.recent_messages.length > 0}
                   fallback={
                     <div style="padding: 24px 16px; color: hsl(var(--muted-foreground)); font-size: var(--font-size-sm); text-align: center;">
-                      No messages yet.
+                      No requests yet.
                     </div>
                   }
                 >
@@ -681,7 +1033,7 @@ const ConnectionDetail: Component = () => {
                       <thead>
                         <tr>
                           <th>Date</th>
-                          <th>Message ID</th>
+                          <th>Request ID</th>
                           <th>Model</th>
                           <th>Tokens</th>
                         </tr>
@@ -805,6 +1157,14 @@ const ConnectionDetail: Component = () => {
                           <Show when={isByok()}>
                             <th>Cost (30d)</th>
                           </Show>
+                          <th class="rel-col">
+                            Total attempts
+                            <InfoTooltip text={totalAttemptsTooltip(autofixEligible())} />
+                          </th>
+                          <th class="rel-col">
+                            Success rate
+                            <InfoTooltip text={CONNECTION_HARNESS_SUCCESS_RATE_TOOLTIP} />
+                          </th>
                           <th>Last used</th>
                         </tr>
                       </thead>
@@ -850,6 +1210,16 @@ const ConnectionDetail: Component = () => {
                               <Show when={isByok()}>
                                 <td>{formatCost(agent.cost_30d) ?? '$0.00'}</td>
                               </Show>
+                              <td class="rel-col">{formatNumber(agent.attempts_30d ?? 0)}</td>
+                              <td class="rel-col">
+                                {(() => {
+                                  const rate = attemptSuccessRate({
+                                    attempts: agent.attempts_30d ?? 0,
+                                    succeeded: agent.succeeded_30d,
+                                  });
+                                  return rate == null ? '—' : `${(rate * 100).toFixed(1)}%`;
+                                })()}
+                              </td>
                               <td style="color: hsl(var(--muted-foreground));">
                                 {agent.last_used ? formatTimeAgo(agent.last_used) : '—'}
                               </td>
@@ -869,10 +1239,10 @@ const ConnectionDetail: Component = () => {
                     <div
                       class="modal-overlay"
                       onClick={(e) => {
-                        if (e.target === e.currentTarget) setShowManageModal(false);
+                        if (e.target === e.currentTarget) closeManageModal();
                       }}
                       onKeyDown={(e) => {
-                        if (e.key === 'Escape') setShowManageModal(false);
+                        if (e.key === 'Escape') closeManageModal();
                       }}
                     >
                       <div
@@ -902,7 +1272,7 @@ const ConnectionDetail: Component = () => {
                           </div>
                           <button
                             type="button"
-                            onClick={() => setShowManageModal(false)}
+                            onClick={closeManageModal}
                             style="background: none; border: none; cursor: pointer; padding: 4px; color: hsl(var(--muted-foreground)); font-size: 18px; line-height: 1;"
                             aria-label="Close"
                           >
@@ -972,27 +1342,87 @@ const ConnectionDetail: Component = () => {
 
                           {/* Actions */}
                           <div style="display: flex; justify-content: space-between; align-items: center; padding-top: 16px; border-top: 1px solid hsl(var(--border));">
-                            <button class="btn btn--destructive btn--sm" onClick={handleDisconnect}>
+                            <button class="btn btn--danger btn--sm" onClick={handleDisconnect}>
                               Disconnect
                             </button>
-                            <button
-                              class="btn btn--outline btn--sm"
-                              onClick={() => setShowManageModal(false)}
-                            >
+                            <button class="btn btn--outline btn--sm" onClick={closeManageModal}>
                               Done
                             </button>
                           </div>
                         </Show>
 
                         <Show when={!c.is_active}>
-                          <div style="display: flex; justify-content: flex-end; padding-top: 12px; border-top: 1px solid hsl(var(--border));">
-                            <button
-                              class="btn btn--outline btn--sm"
-                              onClick={() => setShowManageModal(false)}
+                          <Show
+                            when={showDeleteConfirm()}
+                            fallback={
+                              <div style="display: flex; justify-content: space-between; align-items: center; padding-top: 12px; border-top: 1px solid hsl(var(--border));">
+                                <button class="btn btn--danger btn--sm" onClick={openDeleteConfirm}>
+                                  Delete
+                                </button>
+                                <button class="btn btn--outline btn--sm" onClick={closeManageModal}>
+                                  Close
+                                </button>
+                              </div>
+                            }
+                          >
+                            <div
+                              class="connection-delete-confirmation"
+                              role="alertdialog"
+                              aria-labelledby="delete-connection-confirm-title"
+                              aria-describedby="delete-connection-confirm-copy"
                             >
-                              Close
-                            </button>
-                          </div>
+                              <div class="connection-delete-confirmation__warning">
+                                <h3
+                                  id="delete-connection-confirm-title"
+                                  class="connection-delete-confirmation__title"
+                                >
+                                  Delete usage history?
+                                </h3>
+                                <p
+                                  id="delete-connection-confirm-copy"
+                                  class="connection-delete-confirmation__copy"
+                                >
+                                  This will permanently delete this inactive connection and its
+                                  usage history. This action cannot be undone.
+                                </p>
+                              </div>
+                              <label
+                                for="delete-connection-confirm-input"
+                                class="connection-delete-confirmation__label"
+                              >
+                                Type the connection name to confirm
+                              </label>
+                              <input
+                                id="delete-connection-confirm-input"
+                                class="provider-detail__input"
+                                type="text"
+                                value={deleteConfirmName()}
+                                onInput={(e) => setDeleteConfirmName(e.currentTarget.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' && deleteConfirmMatches()) {
+                                    handleDisconnect();
+                                  }
+                                }}
+                                placeholder={c.label}
+                              />
+                              <div class="connection-delete-confirmation__footer">
+                                <button
+                                  class="btn btn--outline btn--sm"
+                                  onClick={closeDeleteConfirm}
+                                  disabled={deletingConnection()}
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  class="btn btn--danger btn--sm"
+                                  onClick={handleDisconnect}
+                                  disabled={!deleteConfirmMatches() || deletingConnection()}
+                                >
+                                  {deletingConnection() ? 'Deleting...' : 'Delete connection'}
+                                </button>
+                              </div>
+                            </div>
+                          </Show>
                         </Show>
                       </div>
                     </div>
@@ -1002,10 +1432,10 @@ const ConnectionDetail: Component = () => {
                   <div
                     class="modal-overlay"
                     onClick={(e) => {
-                      if (e.target === e.currentTarget) setShowManageModal(false);
+                      if (e.target === e.currentTarget) closeManageModal();
                     }}
                     onKeyDown={(e) => {
-                      if (e.key === 'Escape') setShowManageModal(false);
+                      if (e.key === 'Escape') closeManageModal();
                     }}
                   >
                     <div
@@ -1019,12 +1449,12 @@ const ConnectionDetail: Component = () => {
                         agentName={firstAgentName()}
                         initialData={customProviderData()!}
                         onCreated={() => {
-                          setShowManageModal(false);
+                          closeManageModal();
                           refetchDetail();
                         }}
-                        onBack={() => setShowManageModal(false)}
+                        onBack={closeManageModal}
                         onDeleted={() => {
-                          setShowManageModal(false);
+                          closeManageModal();
                           navigate(backLink());
                         }}
                       />
